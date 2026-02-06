@@ -190,7 +190,7 @@ If you use this code in your research, please cite:
 ```bibtex
 @software{marena2026microglia,
   title={Microglia-Inspired Dynamic Pruning for Reasoning Models},
-  author={Marena, Tommaso R. and Ketonis},
+  author={Marena, Tommaso R. and Ketonis, Panos},
   year={2026},
   url={https://github.com/Tommaso-R-Marena/microglia-pruning}
 }
