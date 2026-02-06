@@ -2,12 +2,13 @@
 
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model, TaskType
 from typing import Optional, Tuple, Dict
 from tqdm import tqdm
 import re
+import os
 
 from .agent import MicrogliaAgent
 from .hooks import register_hooks, remove_hooks
@@ -39,13 +40,27 @@ class MicrogliaPruningSystem:
         # Load model and tokenizer
         if isinstance(model, str):
             print(f"Loading base model: {model}")
+            
+            # First load config to fix RoPE scaling issue
+            config = AutoConfig.from_pretrained(model, trust_remote_code=True)
+            
+            # Fix rope_scaling config if needed (Phi-3 issue)
+            if hasattr(config, 'rope_scaling') and config.rope_scaling is not None:
+                if isinstance(config.rope_scaling, dict) and 'type' not in config.rope_scaling:
+                    # Add default type if missing
+                    config.rope_scaling['type'] = 'default'
+                    print("Fixed rope_scaling config")
+            
+            # Now load model with fixed config
             self.model = AutoModelForCausalLM.from_pretrained(
                 model,
+                config=config,
                 device_map="auto",
                 torch_dtype=torch.bfloat16,
                 attn_implementation="eager",  # Need this for hooks
                 trust_remote_code=True
             )
+            
             self.tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
             
             # Phi models need padding token
