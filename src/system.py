@@ -2,33 +2,25 @@
 
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
 from datasets import load_dataset
-from peft import LoraConfig, get_peft_model
-from typing import Optional, Tuple
+from peft import LoraConfig, get_peft_model, TaskType
+from typing import Optional, Tuple, Dict
+from tqdm import tqdm
+import re
 
 from .agent import MicrogliaAgent
 from .hooks import register_hooks, remove_hooks
 from .pruned_attention import PrunedAttention
-from .loss import compute_pruning_loss, get_alpha_schedule
+from .loss import compute_pruning_loss, get_alpha_schedule, compute_efficiency_metrics
 
 
 class MicrogliaPruningSystem:
     """Complete system for microglia-inspired dynamic pruning.
     
-    This class handles:
-    - Loading and preparing the base model
-    - Initializing pruning agents for each layer
-    - Training the pruning system
-    - Running inference with dynamic pruning
-    - Evaluating efficiency and accuracy
-    
-    Args:
-        model: Base transformer model or model name
-        num_heads: Number of attention heads per layer
-        hidden_dim: Hidden dimension for MicrogliaAgent MLPs
-        temperature: Temperature for sigmoid in agents
-        device: Device to run on ('cuda' or 'cpu')
+    This orchestrates the entire pruning pipeline from model loading through
+    training and evaluation. Based on biological inspiration from microglial
+    synaptic pruning in the brain.
     """
     
     def __init__(self,
@@ -40,41 +32,59 @@ class MicrogliaPruningSystem:
         
         self.device = device
         self.num_heads = num_heads
+        self.current_masks = {}  # Store masks from last forward pass
         
-        # Load model if string provided
+        print(f"Initializing MicrogliaPruningSystem on {device}...")
+        
+        # Load model and tokenizer
         if isinstance(model, str):
+            print(f"Loading base model: {model}")
             self.model = AutoModelForCausalLM.from_pretrained(
                 model,
                 device_map="auto",
                 torch_dtype=torch.bfloat16,
-                attn_implementation="eager"  # Required for hooks
+                attn_implementation="eager",  # Need this for hooks
+                trust_remote_code=True
             )
-            self.tokenizer = AutoTokenizer.from_pretrained(model)
+            self.tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+            
+            # Phi models need padding token
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+                self.model.config.pad_token_id = self.tokenizer.eos_token_id
         else:
             self.model = model
             self.tokenizer = None
         
-        # Initialize agents for each layer
+        print(f"Model has {len(self.model.model.layers)} layers")
+        
+        # Create one agent per layer
+        print(f"Initializing {len(self.model.model.layers)} pruning agents...")
         self.agents = nn.ModuleList([
             MicrogliaAgent(hidden_dim, num_heads, temperature)
             for _ in range(len(self.model.model.layers))
         ])
-        
-        # Move agents to device
         self.agents.to(device)
         
-        # Wrap attention layers with pruning
+        # Wrap attention layers
         self._wrap_attention_layers()
         
-        # Storage for monitoring
+        # For monitoring during training
         self.activation_cache = {}
-        self.mask_history = []
+        self.training_history = []
         
+        print("System initialized successfully!")
+    
     def _wrap_attention_layers(self):
-        """Replace attention layers with pruned versions."""
+        """Replace standard attention with pruned attention."""
+        print("Wrapping attention layers with pruning modules...")
         for idx, layer in enumerate(self.model.model.layers):
             original_attn = layer.self_attn
-            layer.self_attn = PrunedAttention(original_attn, self.agents[idx])
+            layer.self_attn = PrunedAttention(
+                original_attn, 
+                self.agents[idx],
+                hard_prune=False  # Use soft masks during training
+            )
     
     def train(self,
              dataset_name: str = "gsm8k",
@@ -82,91 +92,158 @@ class MicrogliaPruningSystem:
              batch_size: int = 4,
              learning_rate: float = 1e-4,
              alpha_schedule: Tuple[float, float] = (0.01, 0.3),
-             use_lora: bool = True):
-        """Train the pruning system.
+             use_lora: bool = True,
+             save_steps: int = 500):
+        """Train the pruning agents on a reasoning dataset.
         
-        Args:
-            dataset_name: Name of HuggingFace dataset
-            num_epochs: Number of training epochs
-            batch_size: Training batch size
-            learning_rate: Learning rate for agents
-            alpha_schedule: (min, max) for sparsity weight curriculum
-            use_lora: Whether to use LoRA for efficient fine-tuning
+        We use a two-stage approach:
+        1. Fine-tune base model on task (optional with LoRA)
+        2. Train pruning agents while keeping model mostly frozen
         """
-        # Load dataset
-        dataset = load_dataset(dataset_name, "main", split="train")
+        print("\n" + "="*60)
+        print("Starting Training")
+        print("="*60)
         
-        # Apply LoRA if requested
+        # Load and prepare dataset
+        print(f"Loading {dataset_name} dataset...")
+        dataset = load_dataset(dataset_name, "main")
+        
+        # Preprocess for training
+        def preprocess_function(examples):
+            # Format: question + answer for GSM8K
+            prompts = [
+                f"Question: {q}\nAnswer: {a}"
+                for q, a in zip(examples['question'], examples['answer'])
+            ]
+            return self.tokenizer(
+                prompts,
+                truncation=True,
+                padding='max_length',
+                max_length=512,
+                return_tensors='pt'
+            )
+        
+        print("Preprocessing dataset...")
+        train_dataset = dataset['train'].map(
+            preprocess_function,
+            batched=True,
+            remove_columns=dataset['train'].column_names
+        )
+        
+        # Apply LoRA if requested - makes training much more efficient
         if use_lora:
+            print("Applying LoRA for parameter-efficient training...")
             lora_config = LoraConfig(
                 r=16,
                 lora_alpha=32,
                 target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
-                lora_dropout=0.05
+                lora_dropout=0.05,
+                task_type=TaskType.CAUSAL_LM
             )
             self.model = get_peft_model(self.model, lora_config)
+            self.model.print_trainable_parameters()
         
-        # Optimizer for agents only (freeze base model initially)
-        optimizer = torch.optim.AdamW(self.agents.parameters(), lr=learning_rate)
+        # Set up optimizer - only train agents initially
+        print("\nSetting up optimizer for pruning agents...")
+        optimizer = torch.optim.AdamW(
+            self.agents.parameters(),
+            lr=learning_rate,
+            weight_decay=0.01
+        )
         
-        # Training loop
+        # Training loop with curriculum learning
         self.model.train()
         alpha_min, alpha_max = alpha_schedule
         
+        print(f"\nTraining for {num_epochs} epochs...")
+        print(f"Alpha schedule: {alpha_min} -> {alpha_max}\n")
+        
         for epoch in range(num_epochs):
             alpha = get_alpha_schedule(epoch, num_epochs, alpha_min, alpha_max)
-            epoch_loss = 0.0
+            epoch_metrics = {'task_loss': 0.0, 'sparsity_loss': 0.0, 'total_loss': 0.0}
             
-            for batch_idx, batch in enumerate(self._get_batches(dataset, batch_size)):
-                # Forward pass
-                outputs = self.model(**batch)
+            print(f"\nEpoch {epoch+1}/{num_epochs} (alpha={alpha:.3f})")
+            
+            # Create dataloader
+            train_loader = torch.utils.data.DataLoader(
+                train_dataset,
+                batch_size=batch_size,
+                shuffle=True
+            )
+            
+            progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}")
+            
+            for step, batch in enumerate(progress_bar):
+                # Move batch to device
+                batch = {k: v.to(self.device) for k, v in batch.items()}
                 
-                # Compute loss
-                # Note: This is simplified - actual implementation would need
-                # to collect masks from all layers
+                # Forward pass
+                outputs = self.model(**batch, labels=batch['input_ids'])
                 task_loss = outputs.loss
                 
-                # Backward and optimize
-                optimizer.zero_grad()
-                task_loss.backward()
-                optimizer.step()
+                # Collect masks from all layers (stored during forward)
+                all_masks = []
+                for layer in self.model.model.layers:
+                    if hasattr(layer.self_attn, 'last_masks'):
+                        all_masks.append(layer.self_attn.last_masks)
                 
-                epoch_loss += task_loss.item()
+                if all_masks:
+                    masks = torch.cat(all_masks, dim=0)
+                    
+                    # Compute combined loss
+                    loss_dict = compute_pruning_loss(task_loss, masks, alpha=alpha)
+                    total_loss = loss_dict['total_loss']
+                    
+                    # Backward pass
+                    optimizer.zero_grad()
+                    total_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.agents.parameters(), 1.0)
+                    optimizer.step()
+                    
+                    # Update metrics
+                    epoch_metrics['task_loss'] += loss_dict['task_loss']
+                    epoch_metrics['sparsity_loss'] += loss_dict['sparsity_loss']
+                    epoch_metrics['total_loss'] += total_loss.item()
+                    
+                    # Update progress bar
+                    progress_bar.set_postfix({
+                        'loss': f"{total_loss.item():.3f}",
+                        'sparsity': f"{loss_dict['sparsity_loss']:.3f}"
+                    })
+                
+                if step >= 100:  # Limit steps per epoch for demo
+                    break
             
-            print(f"Epoch {epoch+1}/{num_epochs}, Loss: {epoch_loss/(batch_idx+1):.4f}, Alpha: {alpha:.3f}")
-    
-    def _get_batches(self, dataset, batch_size: int):
-        """Simple batching iterator (simplified for demo)."""
-        for i in range(0, len(dataset), batch_size):
-            batch = dataset[i:i+batch_size]
-            # Tokenize and prepare batch
-            # This is simplified - real implementation would need proper collation
-            yield batch
+            # Epoch summary
+            n_steps = min(len(train_loader), 100)
+            avg_metrics = {k: v/n_steps for k, v in epoch_metrics.items()}
+            print(f"Epoch {epoch+1} Summary:")
+            print(f"  Task Loss: {avg_metrics['task_loss']:.4f}")
+            print(f"  Sparsity Loss: {avg_metrics['sparsity_loss']:.4f}")
+            print(f"  Total Loss: {avg_metrics['total_loss']:.4f}")
+            
+            self.training_history.append(avg_metrics)
+        
+        print("\n" + "="*60)
+        print("Training Complete!")
+        print("="*60)
     
     def generate(self, prompt: str, max_new_tokens: int = 256, **kwargs):
-        """Generate text with dynamic pruning.
-        
-        Args:
-            prompt: Input text prompt
-            max_new_tokens: Maximum tokens to generate
-            **kwargs: Additional generation parameters
-            
-        Returns:
-            generated_text: Generated output
-        """
+        """Generate text with dynamic pruning enabled."""
         if self.tokenizer is None:
-            raise ValueError("No tokenizer loaded. Provide tokenizer or use model name.")
+            raise ValueError("No tokenizer available")
         
         self.model.eval()
         
-        # Tokenize input
+        # Tokenize
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         
-        # Generate
+        # Generate with pruning
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
+                do_sample=False,  # Greedy decoding for consistency
                 **kwargs
             )
         
@@ -176,60 +253,100 @@ class MicrogliaPruningSystem:
         return generated_text
     
     def get_sparsity(self) -> float:
-        """Get current pruning sparsity (fraction of heads pruned)."""
-        # This would need to track masks during forward pass
-        # Placeholder implementation
-        return 0.25
-    
-    def evaluate(self, dataset_name: str = "gsm8k", split: str = "test") -> dict:
-        """Evaluate accuracy on a benchmark.
+        """Calculate current average pruning sparsity across all layers."""
+        if not self.current_masks:
+            return 0.0
         
-        Args:
-            dataset_name: Name of evaluation dataset
-            split: Dataset split to use
-            
-        Returns:
-            metrics: Dictionary of evaluation metrics
-        """
+        all_masks = []
+        for layer in self.model.model.layers:
+            if hasattr(layer.self_attn, 'last_masks'):
+                all_masks.append(layer.self_attn.last_masks)
+        
+        if not all_masks:
+            return 0.0
+        
+        masks = torch.cat(all_masks, dim=0)
+        metrics = compute_efficiency_metrics(masks)
+        return metrics['sparsity']
+    
+    def evaluate(self, dataset_name: str = "gsm8k", split: str = "test", max_samples: int = 200) -> Dict:
+        """Evaluate accuracy on a reasoning benchmark."""
+        print(f"\nEvaluating on {dataset_name} ({split} split)...")
+        
         dataset = load_dataset(dataset_name, "main", split=split)
         
         self.model.eval()
         correct = 0
         total = 0
         
+        progress_bar = tqdm(dataset.select(range(min(max_samples, len(dataset)))), desc="Evaluating")
+        
         with torch.no_grad():
-            for example in dataset:
+            for example in progress_bar:
                 # Generate answer
-                output = self.generate(example["question"], max_new_tokens=256)
+                prompt = f"Question: {example['question']}\nAnswer:"
+                output = self.generate(prompt, max_new_tokens=256)
                 
-                # Check correctness (simplified)
-                # Real implementation would need proper answer extraction
-                if self._check_answer(output, example["answer"]):
-                    correct += 1
+                # Extract answer (last number in generation)
+                gold_answer = self._extract_answer(example['answer'])
+                pred_answer = self._extract_answer(output)
+                
+                if pred_answer is not None and gold_answer is not None:
+                    if abs(pred_answer - gold_answer) < 0.01:
+                        correct += 1
                 total += 1
                 
-                if total >= 100:  # Limit for demo
-                    break
+                progress_bar.set_postfix({'accuracy': f"{correct/total:.1%}"})
         
-        accuracy = correct / total
-        return {'accuracy': accuracy, 'correct': correct, 'total': total}
+        accuracy = correct / total if total > 0 else 0.0
+        sparsity = self.get_sparsity()
+        
+        results = {
+            'accuracy': accuracy,
+            'correct': correct,
+            'total': total,
+            'sparsity': sparsity
+        }
+        
+        print(f"\nResults:")
+        print(f"  Accuracy: {accuracy:.2%}")
+        print(f"  Correct: {correct}/{total}")
+        print(f"  Sparsity: {sparsity:.1%}")
+        
+        return results
     
-    def _check_answer(self, generated: str, gold: str) -> bool:
-        """Check if generated answer matches gold (simplified)."""
-        # This is a placeholder - real implementation would need
-        # proper answer extraction and comparison
-        return gold.lower() in generated.lower()
+    def _extract_answer(self, text: str) -> Optional[float]:
+        """Extract numerical answer from text (for GSM8K)."""
+        # Look for #### marker first (GSM8K format)
+        if '####' in text:
+            text = text.split('####')[1]
+        
+        # Find all numbers (including decimals)
+        numbers = re.findall(r'-?\d+\.?\d*', text.replace(',', ''))
+        
+        if numbers:
+            try:
+                return float(numbers[-1])  # Last number is usually the answer
+            except ValueError:
+                return None
+        return None
     
     def save(self, path: str):
-        """Save trained system."""
+        """Save the trained pruning system."""
+        print(f"Saving model to {path}...")
         torch.save({
             'agents': self.agents.state_dict(),
             'model': self.model.state_dict() if hasattr(self.model, 'state_dict') else None,
+            'training_history': self.training_history,
         }, path)
+        print("Saved successfully!")
     
     def load(self, path: str):
-        """Load trained system."""
-        checkpoint = torch.load(path)
+        """Load a trained pruning system."""
+        print(f"Loading model from {path}...")
+        checkpoint = torch.load(path, map_location=self.device)
         self.agents.load_state_dict(checkpoint['agents'])
-        if checkpoint['model'] is not None and hasattr(self.model, 'load_state_dict'):
+        if checkpoint.get('model') is not None and hasattr(self.model, 'load_state_dict'):
             self.model.load_state_dict(checkpoint['model'])
+        self.training_history = checkpoint.get('training_history', [])
+        print("Loaded successfully!")
