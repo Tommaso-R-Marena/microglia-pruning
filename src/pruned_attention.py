@@ -7,18 +7,15 @@ from .agent import MicrogliaAgent
 
 
 class PrunedAttention(nn.Module):
-    """Wrapper around standard attention that applies learned pruning masks.
+    """Wraps attention layer with learned dynamic pruning.
     
-    This module wraps an existing attention layer and dynamically prunes
-    attention heads based on activation statistics. The pruning is "soft"
-    during training (masks are continuous 0-1 values) and can be made "hard"
-    during inference (masks are binary 0/1).
+    During forward pass:
+    1. Run standard attention
+    2. Compute activation statistics
+    3. Use agent to predict which heads to keep
+    4. Apply masks to attention output
     
-    Args:
-        original_attn: The original attention module to wrap
-        agent: MicrogliaAgent that predicts pruning masks
-        hard_prune: If True, use binary masks during inference (deterministic)
-                   If False, use soft masks (differentiable)
+    The masks are stored so we can compute sparsity metrics later.
     """
     
     def __init__(self, original_attn: nn.Module, agent: MicrogliaAgent, hard_prune: bool = False):
@@ -26,74 +23,72 @@ class PrunedAttention(nn.Module):
         self.attn = original_attn
         self.agent = agent
         self.hard_prune = hard_prune
+        self.last_masks = None  # Store masks for monitoring
         
     def forward(self, 
                 hidden_states: torch.Tensor,
                 attention_mask: torch.Tensor = None,
+                position_ids: torch.Tensor = None,
+                past_key_value = None,
+                output_attentions: bool = False,
+                use_cache: bool = False,
                 **kwargs) -> tuple:
-        """Forward pass with dynamic pruning.
+        """Forward with dynamic head pruning."""
         
-        Args:
-            hidden_states: Input tensor of shape (batch, seq_len, hidden_dim)
-            attention_mask: Optional attention mask
-            **kwargs: Additional arguments passed to original attention
-            
-        Returns:
-            attn_output: Attention output with pruning applied
-            attn_weights: Attention weights (for monitoring)
-        """
-        # Run original attention with attention weights output enabled
-        attn_output, attn_weights = self.attn(
+        # Run original attention - need to handle different model architectures
+        attn_outputs = self.attn(
             hidden_states,
-            attention_mask,
-            output_attentions=True,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_value=past_key_value,
+            output_attentions=True,  # We need attention weights for statistics
+            use_cache=use_cache,
             **kwargs
         )
         
-        # Compute statistics and get pruning masks
-        stats = compute_layer_stats(hidden_states, attn_weights)
-        masks = self.agent(stats)  # Shape: (batch, num_heads)
+        # Unpack outputs (format varies by model)
+        if isinstance(attn_outputs, tuple):
+            attn_output = attn_outputs[0]
+            attn_weights = attn_outputs[1] if len(attn_outputs) > 1 else None
+        else:
+            attn_output = attn_outputs
+            attn_weights = None
         
-        # Apply hard thresholding if in inference mode
-        if self.hard_prune and not self.training:
-            masks = (masks > 0.5).float()
+        # If we have attention weights, compute stats and apply pruning
+        if attn_weights is not None and self.training:
+            # Compute per-head statistics
+            stats = compute_layer_stats(hidden_states, attn_weights)
+            
+            # Get pruning masks from agent
+            masks = self.agent(stats)  # (batch, num_heads)
+            
+            # Apply hard threshold in eval mode
+            if self.hard_prune and not self.training:
+                masks = (masks > 0.5).float()
+            
+            # Store for monitoring
+            self.last_masks = masks.detach()
+            
+            # Apply masks to attention output
+            # Output shape: (batch, seq_len, hidden_dim)
+            batch_size, seq_len, hidden_dim = attn_output.shape
+            num_heads = masks.shape[1]
+            head_dim = hidden_dim // num_heads
+            
+            # Reshape to separate heads
+            attn_output = attn_output.view(batch_size, seq_len, num_heads, head_dim)
+            
+            # Broadcast masks: (batch, num_heads) -> (batch, 1, num_heads, 1)
+            masks_expanded = masks.unsqueeze(1).unsqueeze(-1)
+            
+            # Apply masking
+            attn_output = attn_output * masks_expanded
+            
+            # Reshape back
+            attn_output = attn_output.view(batch_size, seq_len, hidden_dim)
         
-        # Reshape masks to broadcast across sequence and feature dimensions
-        # From (batch, num_heads) to (batch, num_heads, 1, 1)
-        masks = masks.unsqueeze(-1).unsqueeze(-1)
-        
-        # Apply masks to attention output
-        # Assuming attn_output has shape (batch, seq_len, hidden_dim)
-        # We need to reshape to apply per-head masks
-        batch_size, seq_len, hidden_dim = attn_output.shape
-        num_heads = masks.shape[1]
-        head_dim = hidden_dim // num_heads
-        
-        # Reshape: (batch, seq_len, hidden_dim) -> (batch, seq_len, num_heads, head_dim)
-        attn_output_heads = attn_output.view(batch_size, seq_len, num_heads, head_dim)
-        
-        # Apply masks: (batch, seq_len, num_heads, head_dim) * (batch, num_heads, 1, 1)
-        # Broadcasting handles the rest
-        attn_output_heads = attn_output_heads * masks
-        
-        # Reshape back: (batch, seq_len, num_heads, head_dim) -> (batch, seq_len, hidden_dim)
-        attn_output = attn_output_heads.view(batch_size, seq_len, hidden_dim)
-        
-        return attn_output, attn_weights
-    
-    def get_mask_stats(self) -> dict:
-        """Get current pruning statistics.
-        
-        Returns:
-            dict with keys:
-                - 'sparsity': Fraction of heads currently pruned (0 to 1)
-                - 'active_heads': Number of heads with mask > 0.5
-                - 'mean_mask': Average mask value
-        """
-        # This requires storing the last masks - would need to be added in forward
-        # For now, return placeholder
-        return {
-            'sparsity': 0.0,
-            'active_heads': self.agent.num_heads,
-            'mean_mask': 1.0
-        }
+        # Return in original format
+        if isinstance(attn_outputs, tuple):
+            return (attn_output,) + attn_outputs[1:]
+        else:
+            return attn_output
