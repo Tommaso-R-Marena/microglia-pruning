@@ -45,13 +45,11 @@ class MicrogliaPruningSystem:
             config = AutoConfig.from_pretrained(model, trust_remote_code=True)
             
             # Fix rope_scaling config if needed (Phi-3 issue)
-            # The config sometimes has rope_scaling but missing 'type'
-            # Valid types are: 'linear', 'longrope', or None
             if hasattr(config, 'rope_scaling') and config.rope_scaling is not None:
                 if isinstance(config.rope_scaling, dict) and 'type' not in config.rope_scaling:
-                    # Just remove rope_scaling entirely - let model use default
-                    config.rope_scaling = None
-                    print("Removed invalid rope_scaling config (will use default)")
+                    # Add default type if missing
+                    config.rope_scaling['type'] = 'default'
+                    print("Fixed rope_scaling config")
             
             # Now load model with fixed config
             self.model = AutoModelForCausalLM.from_pretrained(
@@ -255,12 +253,14 @@ class MicrogliaPruningSystem:
         # Tokenize
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         
-        # Generate with pruning
+        # Generate with pruning - disable cache to avoid compatibility issues
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,  # Greedy decoding for consistency
+                use_cache=False,  # Disable KV cache to avoid DynamicCache issues
+                pad_token_id=self.tokenizer.pad_token_id,
                 **kwargs
             )
         
