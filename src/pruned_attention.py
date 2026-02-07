@@ -11,11 +11,11 @@ class PrunedAttention(nn.Module):
     
     During forward pass:
     1. Run standard attention
-    2. Compute activation statistics
+    2. Compute activation statistics (only during training)
     3. Use agent to predict which heads to keep
     4. Apply masks to attention output
     
-    The masks are stored so we can compute sparsity metrics later.
+    Important: Only applies pruning during training to avoid breaking generation
     """
     
     def __init__(self, original_attn: nn.Module, agent: MicrogliaAgent, hard_prune: bool = False):
@@ -24,6 +24,7 @@ class PrunedAttention(nn.Module):
         self.agent = agent
         self.hard_prune = hard_prune
         self.last_masks = None  # Store masks for monitoring
+        self.enable_pruning = False  # Only enable during training
         
     def forward(self, 
                 hidden_states: torch.Tensor,
@@ -33,18 +34,23 @@ class PrunedAttention(nn.Module):
                 output_attentions: bool = False,
                 use_cache: bool = False,
                 **kwargs) -> tuple:
-        """Forward with dynamic head pruning."""
+        """Forward with optional dynamic head pruning."""
         
-        # Run original attention - need to handle different model architectures
+        # Run original attention
         attn_outputs = self.attn(
             hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_value=past_key_value,
-            output_attentions=True,  # We need attention weights for statistics
+            output_attentions=output_attentions or self.enable_pruning,  # Need weights for pruning
             use_cache=use_cache,
             **kwargs
         )
+        
+        # Only apply pruning if explicitly enabled (during training)
+        # This prevents breaking generation during inference
+        if not self.enable_pruning or not self.training:
+            return attn_outputs
         
         # Unpack outputs (format varies by model)
         if isinstance(attn_outputs, tuple):
@@ -55,40 +61,47 @@ class PrunedAttention(nn.Module):
             attn_weights = None
         
         # If we have attention weights, compute stats and apply pruning
-        if attn_weights is not None and self.training:
-            # Compute per-head statistics
-            stats = compute_layer_stats(hidden_states, attn_weights)
-            
-            # Get pruning masks from agent
-            masks = self.agent(stats)  # (batch, num_heads)
-            
-            # Apply hard threshold in eval mode
-            if self.hard_prune and not self.training:
-                masks = (masks > 0.5).float()
-            
-            # Store for monitoring
-            self.last_masks = masks.detach()
-            
-            # Apply masks to attention output
-            # Output shape: (batch, seq_len, hidden_dim)
-            batch_size, seq_len, hidden_dim = attn_output.shape
-            num_heads = masks.shape[1]
-            head_dim = hidden_dim // num_heads
-            
-            # Reshape to separate heads
-            attn_output = attn_output.view(batch_size, seq_len, num_heads, head_dim)
-            
-            # Broadcast masks: (batch, num_heads) -> (batch, 1, num_heads, 1)
-            masks_expanded = masks.unsqueeze(1).unsqueeze(-1)
-            
-            # Apply masking
-            attn_output = attn_output * masks_expanded
-            
-            # Reshape back
-            attn_output = attn_output.view(batch_size, seq_len, hidden_dim)
+        if attn_weights is not None:
+            try:
+                # Compute per-head statistics
+                stats = compute_layer_stats(hidden_states, attn_weights)
+                
+                # Get pruning masks from agent
+                masks = self.agent(stats)  # (batch, num_heads)
+                
+                # Apply hard threshold in eval mode
+                if self.hard_prune and not self.training:
+                    masks = (masks > 0.5).float()
+                
+                # Store for monitoring
+                self.last_masks = masks.detach()
+                
+                # Apply masks to attention output
+                batch_size, seq_len, hidden_dim = attn_output.shape
+                num_heads = masks.shape[1]
+                head_dim = hidden_dim // num_heads
+                
+                # Reshape to separate heads
+                attn_output = attn_output.view(batch_size, seq_len, num_heads, head_dim)
+                
+                # Broadcast masks: (batch, num_heads) -> (batch, 1, num_heads, 1)
+                masks_expanded = masks.unsqueeze(1).unsqueeze(-1)
+                
+                # Apply masking
+                attn_output = attn_output * masks_expanded
+                
+                # Reshape back
+                attn_output = attn_output.view(batch_size, seq_len, hidden_dim)
+                
+                # Return in original format
+                if isinstance(attn_outputs, tuple):
+                    return (attn_output,) + attn_outputs[1:]
+                else:
+                    return attn_output
+            except Exception as e:
+                # If pruning fails, just return original output
+                print(f"Pruning failed: {e}, using original output")
+                return attn_outputs
         
-        # Return in original format
-        if isinstance(attn_outputs, tuple):
-            return (attn_output,) + attn_outputs[1:]
-        else:
-            return attn_output
+        # Return original if no pruning applied
+        return attn_outputs

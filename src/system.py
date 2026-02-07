@@ -9,6 +9,7 @@ from typing import Optional, Tuple, Dict
 from tqdm import tqdm
 import re
 import os
+import gc
 
 from .agent import MicrogliaAgent
 from .hooks import register_hooks, remove_hooks
@@ -45,16 +46,12 @@ class MicrogliaPruningSystem:
             config = AutoConfig.from_pretrained(model, trust_remote_code=True)
             
             # Fix rope_scaling config if needed (Phi-3 issue)
-            # If rope_scaling exists but doesn't have proper structure, disable it
             if hasattr(config, 'rope_scaling') and config.rope_scaling is not None:
                 if isinstance(config.rope_scaling, dict):
-                    # Check if it has the required 'type' key with valid value
                     if 'type' not in config.rope_scaling:
-                        # No type specified - just disable rope scaling
                         config.rope_scaling = None
                         print("Disabled rope_scaling (missing type)")
                     elif config.rope_scaling.get('type') not in ['linear', 'dynamic', 'longrope']:
-                        # Invalid type - disable it
                         config.rope_scaling = None
                         print(f"Disabled rope_scaling (invalid type: {config.rope_scaling.get('type')})")
             
@@ -88,7 +85,7 @@ class MicrogliaPruningSystem:
         ])
         self.agents.to(device)
         
-        # Wrap attention layers
+        # Wrap attention layers (but don't enable pruning yet)
         self._wrap_attention_layers()
         
         # For monitoring during training
@@ -108,31 +105,34 @@ class MicrogliaPruningSystem:
                 hard_prune=False  # Use soft masks during training
             )
     
+    def _enable_pruning(self, enable: bool = True):
+        """Enable or disable pruning in all layers."""
+        for layer in self.model.model.layers:
+            if isinstance(layer.self_attn, PrunedAttention):
+                layer.self_attn.enable_pruning = enable
+    
     def train(self,
              dataset_name: str = "gsm8k",
              num_epochs: int = 10,
-             batch_size: int = 4,
+             batch_size: int = 2,  # Reduced default for memory
              learning_rate: float = 1e-4,
              alpha_schedule: Tuple[float, float] = (0.01, 0.3),
              use_lora: bool = True,
              save_steps: int = 500):
-        """Train the pruning agents on a reasoning dataset.
-        
-        We use a two-stage approach:
-        1. Fine-tune base model on task (optional with LoRA)
-        2. Train pruning agents while keeping model mostly frozen
-        """
+        """Train the pruning agents on a reasoning dataset."""
         print("\n" + "="*60)
         print("Starting Training")
         print("="*60)
+        
+        # Enable pruning for training
+        self._enable_pruning(True)
         
         # Load and prepare dataset
         print(f"Loading {dataset_name} dataset...")
         dataset = load_dataset(dataset_name, "main")
         
-        # Preprocess for training
+        # Preprocess for training - use smaller subset
         def preprocess_function(examples):
-            # Format: question + answer for GSM8K
             prompts = [
                 f"Question: {q}\nAnswer: {a}"
                 for q, a in zip(examples['question'], examples['answer'])
@@ -141,31 +141,33 @@ class MicrogliaPruningSystem:
                 prompts,
                 truncation=True,
                 padding='max_length',
-                max_length=512,
+                max_length=256,  # Reduced from 512 for memory
                 return_tensors='pt'
             )
         
         print("Preprocessing dataset...")
-        train_dataset = dataset['train'].map(
+        # Use smaller subset for demo
+        train_subset = dataset['train'].select(range(min(1000, len(dataset['train']))))
+        train_dataset = train_subset.map(
             preprocess_function,
             batched=True,
-            remove_columns=dataset['train'].column_names
+            remove_columns=train_subset.column_names
         )
         
-        # Apply LoRA if requested - makes training much more efficient
+        # Apply LoRA for efficiency
         if use_lora:
             print("Applying LoRA for parameter-efficient training...")
             lora_config = LoraConfig(
-                r=16,
-                lora_alpha=32,
-                target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+                r=8,  # Reduced from 16 for memory
+                lora_alpha=16,
+                target_modules=["q_proj", "v_proj"],  # Fewer modules for memory
                 lora_dropout=0.05,
                 task_type=TaskType.CAUSAL_LM
             )
             self.model = get_peft_model(self.model, lora_config)
             self.model.print_trainable_parameters()
         
-        # Set up optimizer - only train agents initially
+        # Optimizer for agents only
         print("\nSetting up optimizer for pruning agents...")
         optimizer = torch.optim.AdamW(
             self.agents.parameters(),
@@ -173,7 +175,7 @@ class MicrogliaPruningSystem:
             weight_decay=0.01
         )
         
-        # Training loop with curriculum learning
+        # Training loop
         self.model.train()
         alpha_min, alpha_max = alpha_schedule
         
@@ -203,10 +205,10 @@ class MicrogliaPruningSystem:
                 outputs = self.model(**batch, labels=batch['input_ids'])
                 task_loss = outputs.loss
                 
-                # Collect masks from all layers (stored during forward)
+                # Collect masks from all layers
                 all_masks = []
                 for layer in self.model.model.layers:
-                    if hasattr(layer.self_attn, 'last_masks'):
+                    if hasattr(layer.self_attn, 'last_masks') and layer.self_attn.last_masks is not None:
                         all_masks.append(layer.self_attn.last_masks)
                 
                 if all_masks:
@@ -233,11 +235,15 @@ class MicrogliaPruningSystem:
                         'sparsity': f"{loss_dict['sparsity_loss']:.3f}"
                     })
                 
-                if step >= 100:  # Limit steps per epoch for demo
+                # Free memory periodically
+                if step % 10 == 0:
+                    torch.cuda.empty_cache()
+                
+                if step >= 50:  # Even smaller for demo
                     break
             
             # Epoch summary
-            n_steps = min(len(train_loader), 100)
+            n_steps = min(len(train_loader), 50)
             avg_metrics = {k: v/n_steps for k, v in epoch_metrics.items()}
             print(f"Epoch {epoch+1} Summary:")
             print(f"  Task Loss: {avg_metrics['task_loss']:.4f}")
@@ -245,29 +251,39 @@ class MicrogliaPruningSystem:
             print(f"  Total Loss: {avg_metrics['total_loss']:.4f}")
             
             self.training_history.append(avg_metrics)
+            
+            # Clean up
+            gc.collect()
+            torch.cuda.empty_cache()
+        
+        # Disable pruning after training (for clean inference)
+        self._enable_pruning(False)
         
         print("\n" + "="*60)
         print("Training Complete!")
         print("="*60)
     
     def generate(self, prompt: str, max_new_tokens: int = 256, **kwargs):
-        """Generate text with dynamic pruning enabled."""
+        """Generate text with pruning disabled for clean output."""
         if self.tokenizer is None:
             raise ValueError("No tokenizer available")
         
+        # Make sure pruning is disabled during generation
+        self._enable_pruning(False)
         self.model.eval()
         
         # Tokenize
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         
-        # Generate with pruning - disable cache to avoid compatibility issues
+        # Generate
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
-                do_sample=False,  # Greedy decoding for consistency
-                use_cache=False,  # Disable KV cache to avoid DynamicCache issues
+                do_sample=False,
+                use_cache=False,
                 pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
                 **kwargs
             )
         
@@ -278,12 +294,9 @@ class MicrogliaPruningSystem:
     
     def get_sparsity(self) -> float:
         """Calculate current average pruning sparsity across all layers."""
-        if not self.current_masks:
-            return 0.0
-        
         all_masks = []
         for layer in self.model.model.layers:
-            if hasattr(layer.self_attn, 'last_masks'):
+            if hasattr(layer.self_attn, 'last_masks') and layer.self_attn.last_masks is not None:
                 all_masks.append(layer.self_attn.last_masks)
         
         if not all_masks:
@@ -297,6 +310,9 @@ class MicrogliaPruningSystem:
         """Evaluate accuracy on a reasoning benchmark."""
         print(f"\nEvaluating on {dataset_name} ({split} split)...")
         
+        # Disable pruning for clean evaluation
+        self._enable_pruning(False)
+        
         dataset = load_dataset(dataset_name, "main", split=split)
         
         self.model.eval()
@@ -307,11 +323,9 @@ class MicrogliaPruningSystem:
         
         with torch.no_grad():
             for example in progress_bar:
-                # Generate answer
                 prompt = f"Question: {example['question']}\nAnswer:"
                 output = self.generate(prompt, max_new_tokens=256)
                 
-                # Extract answer (last number in generation)
                 gold_answer = self._extract_answer(example['answer'])
                 pred_answer = self._extract_answer(output)
                 
@@ -341,16 +355,14 @@ class MicrogliaPruningSystem:
     
     def _extract_answer(self, text: str) -> Optional[float]:
         """Extract numerical answer from text (for GSM8K)."""
-        # Look for #### marker first (GSM8K format)
         if '####' in text:
             text = text.split('####')[1]
         
-        # Find all numbers (including decimals)
         numbers = re.findall(r'-?\d+\.?\d*', text.replace(',', ''))
         
         if numbers:
             try:
-                return float(numbers[-1])  # Last number is usually the answer
+                return float(numbers[-1])
             except ValueError:
                 return None
         return None
@@ -360,7 +372,6 @@ class MicrogliaPruningSystem:
         print(f"Saving model to {path}...")
         torch.save({
             'agents': self.agents.state_dict(),
-            'model': self.model.state_dict() if hasattr(self.model, 'state_dict') else None,
             'training_history': self.training_history,
         }, path)
         print("Saved successfully!")
@@ -370,7 +381,5 @@ class MicrogliaPruningSystem:
         print(f"Loading model from {path}...")
         checkpoint = torch.load(path, map_location=self.device)
         self.agents.load_state_dict(checkpoint['agents'])
-        if checkpoint.get('model') is not None and hasattr(self.model, 'load_state_dict'):
-            self.model.load_state_dict(checkpoint['model'])
         self.training_history = checkpoint.get('training_history', [])
         print("Loaded successfully!")
