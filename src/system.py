@@ -18,12 +18,7 @@ from .loss import compute_pruning_loss, get_alpha_schedule, compute_efficiency_m
 
 
 class MicrogliaPruningSystem:
-    """Complete system for microglia-inspired dynamic pruning.
-    
-    This orchestrates the entire pruning pipeline from model loading through
-    training and evaluation. Based on biological inspiration from microglial
-    synaptic pruning in the brain.
-    """
+    """Complete system for microglia-inspired dynamic pruning."""
     
     def __init__(self,
                  model: str or nn.Module,
@@ -34,18 +29,17 @@ class MicrogliaPruningSystem:
         
         self.device = device
         self.num_heads = num_heads
-        self.current_masks = {}  # Store masks from last forward pass
+        self.current_masks = {}
+        self.pruning_enabled = False  # Track pruning state
         
         print(f"Initializing MicrogliaPruningSystem on {device}...")
         
-        # Load model and tokenizer
         if isinstance(model, str):
             print(f"Loading base model: {model}")
             
-            # First load config to fix RoPE scaling issue
             config = AutoConfig.from_pretrained(model, trust_remote_code=True)
             
-            # Fix rope_scaling config if needed (Phi-3 issue)
+            # Fix rope_scaling
             if hasattr(config, 'rope_scaling') and config.rope_scaling is not None:
                 if isinstance(config.rope_scaling, dict):
                     if 'type' not in config.rope_scaling:
@@ -53,34 +47,28 @@ class MicrogliaPruningSystem:
                         print("Disabled rope_scaling (missing type)")
                     elif config.rope_scaling.get('type') not in ['linear', 'dynamic', 'longrope']:
                         config.rope_scaling = None
-                        print(f"Disabled rope_scaling (invalid type: {config.rope_scaling.get('type')})")
+                        print(f"Disabled rope_scaling (invalid type)")
             
-            # Now load model with fixed config
             self.model = AutoModelForCausalLM.from_pretrained(
                 model,
                 config=config,
                 device_map="auto",
                 torch_dtype=torch.bfloat16,
-                attn_implementation="eager",  # Need this for hooks
+                attn_implementation="eager",
                 trust_remote_code=True
             )
             
-            # Load tokenizer
             self.tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
             
-            # FIX: Phi-3 has wrong EOS token by default - this causes endless generation
-            # The correct EOS token is <|end|> (32007), not <|endoftext|> (32000)
+            # Fix Phi-3 EOS token
             if 'phi-3' in model.lower():
                 print("Fixing Phi-3 EOS token issue...")
-                # Set correct EOS and pad tokens for Phi-3
                 self.tokenizer.eos_token = "<|end|>"
                 self.tokenizer.pad_token = "<|end|>"
-                # Update model config to match
-                self.model.config.eos_token_id = self.tokenizer.convert_tokens_to_ids("<|end|>")  # Should be 32007
+                self.model.config.eos_token_id = self.tokenizer.convert_tokens_to_ids("<|end|>")
                 self.model.config.pad_token_id = self.model.config.eos_token_id
                 print(f"Set EOS token to '<|end|>' (ID: {self.model.config.eos_token_id})")
             else:
-                # For other models, just ensure pad token exists
                 if self.tokenizer.pad_token is None:
                     self.tokenizer.pad_token = self.tokenizer.eos_token
                     self.model.config.pad_token_id = self.tokenizer.eos_token_id
@@ -90,7 +78,6 @@ class MicrogliaPruningSystem:
         
         print(f"Model has {len(self.model.model.layers)} layers")
         
-        # Create one agent per layer
         print(f"Initializing {len(self.model.model.layers)} pruning agents...")
         self.agents = nn.ModuleList([
             MicrogliaAgent(hidden_dim, num_heads, temperature)
@@ -98,36 +85,48 @@ class MicrogliaPruningSystem:
         ])
         self.agents.to(device)
         
-        # Wrap attention layers (but don't enable pruning yet)
-        self._wrap_attention_layers()
+        # DON'T wrap attention initially - this was causing the issue!
+        # We'll only wrap when training starts
+        self.wrapped = False
         
-        # For monitoring during training
         self.activation_cache = {}
         self.training_history = []
         
         print("System initialized successfully!")
+        print("Note: Pruning is DISABLED until training starts")
     
     def _wrap_attention_layers(self):
         """Replace standard attention with pruned attention."""
+        if self.wrapped:
+            return
+        
         print("Wrapping attention layers with pruning modules...")
         for idx, layer in enumerate(self.model.model.layers):
             original_attn = layer.self_attn
             layer.self_attn = PrunedAttention(
                 original_attn, 
                 self.agents[idx],
-                hard_prune=False  # Use soft masks during training
+                hard_prune=False
             )
+            layer.self_attn.enable_pruning = False  # Explicitly disable
+        self.wrapped = True
     
     def _enable_pruning(self, enable: bool = True):
         """Enable or disable pruning in all layers."""
+        self.pruning_enabled = enable
+        if not self.wrapped:
+            return
+        
         for layer in self.model.model.layers:
             if isinstance(layer.self_attn, PrunedAttention):
                 layer.self_attn.enable_pruning = enable
+        
+        print(f"Pruning {'ENABLED' if enable else 'DISABLED'}")
     
     def train(self,
              dataset_name: str = "gsm8k",
              num_epochs: int = 10,
-             batch_size: int = 2,  # Reduced default for memory
+             batch_size: int = 2,
              learning_rate: float = 1e-4,
              alpha_schedule: Tuple[float, float] = (0.01, 0.3),
              use_lora: bool = True,
@@ -137,50 +136,76 @@ class MicrogliaPruningSystem:
         print("Starting Training")
         print("="*60)
         
+        # NOW wrap attention for training
+        if not self.wrapped:
+            self._wrap_attention_layers()
+        
         # Enable pruning for training
         self._enable_pruning(True)
         
-        # Load and prepare dataset
         print(f"Loading {dataset_name} dataset...")
         dataset = load_dataset(dataset_name, "main")
         
-        # Preprocess for training - use smaller subset
-        def preprocess_function(examples):
+        print("Preprocessing dataset...")
+        # Use much smaller subset to avoid OOM
+        train_subset = dataset['train'].select(range(min(500, len(dataset['train']))))
+        
+        # Process in smaller batches to avoid OOM during preprocessing
+        processed_examples = []
+        batch_size_preprocess = 100
+        
+        for i in range(0, len(train_subset), batch_size_preprocess):
+            batch = train_subset[i:i+batch_size_preprocess]
             prompts = [
                 f"Question: {q}\nAnswer: {a}"
-                for q, a in zip(examples['question'], examples['answer'])
+                for q, a in zip(batch['question'], batch['answer'])
             ]
-            return self.tokenizer(
+            encoded = self.tokenizer(
                 prompts,
                 truncation=True,
                 padding='max_length',
-                max_length=256,  # Reduced from 512 for memory
+                max_length=128,  # Much shorter
                 return_tensors='pt'
             )
+            
+            # Store as list of dicts
+            for j in range(len(prompts)):
+                processed_examples.append({
+                    'input_ids': encoded['input_ids'][j],
+                    'attention_mask': encoded['attention_mask'][j]
+                })
+            
+            # Clear memory
+            del encoded
+            gc.collect()
         
-        print("Preprocessing dataset...")
-        # Use smaller subset for demo
-        train_subset = dataset['train'].select(range(min(1000, len(dataset['train']))))
-        train_dataset = train_subset.map(
-            preprocess_function,
-            batched=True,
-            remove_columns=train_subset.column_names
-        )
+        # Create simple dataset
+        class SimpleDataset(torch.utils.data.Dataset):
+            def __init__(self, examples):
+                self.examples = examples
+            
+            def __len__(self):
+                return len(self.examples)
+            
+            def __getitem__(self, idx):
+                return self.examples[idx]
         
-        # Apply LoRA for efficiency
+        train_dataset = SimpleDataset(processed_examples)
+        print(f"Prepared {len(train_dataset)} training examples")
+        
+        # Apply LoRA
         if use_lora:
             print("Applying LoRA for parameter-efficient training...")
             lora_config = LoraConfig(
-                r=8,  # Reduced from 16 for memory
+                r=8,
                 lora_alpha=16,
-                target_modules=["q_proj", "v_proj"],  # Fewer modules for memory
+                target_modules=["q_proj", "v_proj"],
                 lora_dropout=0.05,
                 task_type=TaskType.CAUSAL_LM
             )
             self.model = get_peft_model(self.model, lora_config)
             self.model.print_trainable_parameters()
         
-        # Optimizer for agents only
         print("\nSetting up optimizer for pruning agents...")
         optimizer = torch.optim.AdamW(
             self.agents.parameters(),
@@ -188,7 +213,6 @@ class MicrogliaPruningSystem:
             weight_decay=0.01
         )
         
-        # Training loop
         self.model.train()
         alpha_min, alpha_max = alpha_schedule
         
@@ -201,7 +225,6 @@ class MicrogliaPruningSystem:
             
             print(f"\nEpoch {epoch+1}/{num_epochs} (alpha={alpha:.3f})")
             
-            # Create dataloader
             train_loader = torch.utils.data.DataLoader(
                 train_dataset,
                 batch_size=batch_size,
@@ -211,14 +234,11 @@ class MicrogliaPruningSystem:
             progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}")
             
             for step, batch in enumerate(progress_bar):
-                # Move batch to device
                 batch = {k: v.to(self.device) for k, v in batch.items()}
                 
-                # Forward pass
                 outputs = self.model(**batch, labels=batch['input_ids'])
                 task_loss = outputs.loss
                 
-                # Collect masks from all layers
                 all_masks = []
                 for layer in self.model.model.layers:
                     if hasattr(layer.self_attn, 'last_masks') and layer.self_attn.last_masks is not None:
@@ -226,37 +246,30 @@ class MicrogliaPruningSystem:
                 
                 if all_masks:
                     masks = torch.cat(all_masks, dim=0)
-                    
-                    # Compute combined loss
                     loss_dict = compute_pruning_loss(task_loss, masks, alpha=alpha)
                     total_loss = loss_dict['total_loss']
                     
-                    # Backward pass
                     optimizer.zero_grad()
                     total_loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.agents.parameters(), 1.0)
                     optimizer.step()
                     
-                    # Update metrics
                     epoch_metrics['task_loss'] += loss_dict['task_loss']
                     epoch_metrics['sparsity_loss'] += loss_dict['sparsity_loss']
                     epoch_metrics['total_loss'] += total_loss.item()
                     
-                    # Update progress bar
                     progress_bar.set_postfix({
                         'loss': f"{total_loss.item():.3f}",
                         'sparsity': f"{loss_dict['sparsity_loss']:.3f}"
                     })
                 
-                # Free memory periodically
                 if step % 10 == 0:
                     torch.cuda.empty_cache()
                 
-                if step >= 50:  # Even smaller for demo
+                if step >= 30:  # Very short for memory
                     break
             
-            # Epoch summary
-            n_steps = min(len(train_loader), 50)
+            n_steps = min(len(train_loader), 30)
             avg_metrics = {k: v/n_steps for k, v in epoch_metrics.items()}
             print(f"Epoch {epoch+1} Summary:")
             print(f"  Task Loss: {avg_metrics['task_loss']:.4f}")
@@ -265,11 +278,10 @@ class MicrogliaPruningSystem:
             
             self.training_history.append(avg_metrics)
             
-            # Clean up
             gc.collect()
             torch.cuda.empty_cache()
         
-        # Disable pruning after training (for clean inference)
+        # Disable pruning after training
         self._enable_pruning(False)
         
         print("\n" + "="*60)
@@ -277,18 +289,16 @@ class MicrogliaPruningSystem:
         print("="*60)
     
     def generate(self, prompt: str, max_new_tokens: int = 256, **kwargs):
-        """Generate text with pruning disabled for clean output."""
+        """Generate text WITHOUT pruning."""
         if self.tokenizer is None:
             raise ValueError("No tokenizer available")
         
-        # Make sure pruning is disabled during generation
+        # Ensure pruning is OFF
         self._enable_pruning(False)
         self.model.eval()
         
-        # Tokenize
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         
-        # Generate with correct stopping tokens
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
@@ -296,17 +306,18 @@ class MicrogliaPruningSystem:
                 do_sample=False,
                 use_cache=False,
                 pad_token_id=self.tokenizer.pad_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,  # Use correct EOS token
+                eos_token_id=self.tokenizer.eos_token_id,
                 **kwargs
             )
         
-        # Decode
         generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        
         return generated_text
     
     def get_sparsity(self) -> float:
-        """Calculate current average pruning sparsity across all layers."""
+        """Calculate current average pruning sparsity."""
+        if not self.wrapped:
+            return 0.0
+        
         all_masks = []
         for layer in self.model.model.layers:
             if hasattr(layer.self_attn, 'last_masks') and layer.self_attn.last_masks is not None:
@@ -323,7 +334,6 @@ class MicrogliaPruningSystem:
         """Evaluate accuracy on a reasoning benchmark."""
         print(f"\nEvaluating on {dataset_name} ({split} split)...")
         
-        # Disable pruning for clean evaluation
         self._enable_pruning(False)
         
         dataset = load_dataset(dataset_name, "main", split=split)
@@ -367,7 +377,7 @@ class MicrogliaPruningSystem:
         return results
     
     def _extract_answer(self, text: str) -> Optional[float]:
-        """Extract numerical answer from text (for GSM8K)."""
+        """Extract numerical answer from text."""
         if '####' in text:
             text = text.split('####')[1]
         
