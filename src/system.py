@@ -65,12 +65,25 @@ class MicrogliaPruningSystem:
                 trust_remote_code=True
             )
             
+            # Load tokenizer
             self.tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
             
-            # Phi models need padding token
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-                self.model.config.pad_token_id = self.tokenizer.eos_token_id
+            # FIX: Phi-3 has wrong EOS token by default - this causes endless generation
+            # The correct EOS token is <|end|> (32007), not <|endoftext|> (32000)
+            if 'phi-3' in model.lower():
+                print("Fixing Phi-3 EOS token issue...")
+                # Set correct EOS and pad tokens for Phi-3
+                self.tokenizer.eos_token = "<|end|>"
+                self.tokenizer.pad_token = "<|end|>"
+                # Update model config to match
+                self.model.config.eos_token_id = self.tokenizer.convert_tokens_to_ids("<|end|>")  # Should be 32007
+                self.model.config.pad_token_id = self.model.config.eos_token_id
+                print(f"Set EOS token to '<|end|>' (ID: {self.model.config.eos_token_id})")
+            else:
+                # For other models, just ensure pad token exists
+                if self.tokenizer.pad_token is None:
+                    self.tokenizer.pad_token = self.tokenizer.eos_token
+                    self.model.config.pad_token_id = self.tokenizer.eos_token_id
         else:
             self.model = model
             self.tokenizer = None
@@ -275,7 +288,7 @@ class MicrogliaPruningSystem:
         # Tokenize
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         
-        # Generate
+        # Generate with correct stopping tokens
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
@@ -283,7 +296,7 @@ class MicrogliaPruningSystem:
                 do_sample=False,
                 use_cache=False,
                 pad_token_id=self.tokenizer.pad_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,  # Use correct EOS token
                 **kwargs
             )
         
