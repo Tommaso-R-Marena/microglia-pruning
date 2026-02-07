@@ -45,11 +45,18 @@ class MicrogliaPruningSystem:
             config = AutoConfig.from_pretrained(model, trust_remote_code=True)
             
             # Fix rope_scaling config if needed (Phi-3 issue)
+            # If rope_scaling exists but doesn't have proper structure, disable it
             if hasattr(config, 'rope_scaling') and config.rope_scaling is not None:
-                if isinstance(config.rope_scaling, dict) and 'type' not in config.rope_scaling:
-                    # Add default type if missing
-                    config.rope_scaling['type'] = 'default'
-                    print("Fixed rope_scaling config")
+                if isinstance(config.rope_scaling, dict):
+                    # Check if it has the required 'type' key with valid value
+                    if 'type' not in config.rope_scaling:
+                        # No type specified - just disable rope scaling
+                        config.rope_scaling = None
+                        print("Disabled rope_scaling (missing type)")
+                    elif config.rope_scaling.get('type') not in ['linear', 'dynamic', 'longrope']:
+                        # Invalid type - disable it
+                        config.rope_scaling = None
+                        print(f"Disabled rope_scaling (invalid type: {config.rope_scaling.get('type')})")
             
             # Now load model with fixed config
             self.model = AutoModelForCausalLM.from_pretrained(
