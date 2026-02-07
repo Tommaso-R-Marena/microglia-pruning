@@ -30,7 +30,7 @@ class MicrogliaPruningSystem:
         self.device = device
         self.num_heads = num_heads
         self.current_masks = {}
-        self.pruning_enabled = False  # Track pruning state
+        self.pruning_enabled = False
         
         print(f"Initializing MicrogliaPruningSystem on {device}...")
         
@@ -47,7 +47,6 @@ class MicrogliaPruningSystem:
                         print("Disabled rope_scaling (missing type)")
                     elif config.rope_scaling.get('type') not in ['linear', 'dynamic', 'longrope']:
                         config.rope_scaling = None
-                        print(f"Disabled rope_scaling (invalid type)")
             
             self.model = AutoModelForCausalLM.from_pretrained(
                 model,
@@ -60,14 +59,19 @@ class MicrogliaPruningSystem:
             
             self.tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
             
-            # Fix Phi-3 EOS token
+            # Fix Phi-3 EOS token issue
             if 'phi-3' in model.lower():
                 print("Fixing Phi-3 EOS token issue...")
                 self.tokenizer.eos_token = "<|end|>"
-                self.tokenizer.pad_token = "<|end|>"
-                self.model.config.eos_token_id = self.tokenizer.convert_tokens_to_ids("<|end|>")
-                self.model.config.pad_token_id = self.model.config.eos_token_id
-                print(f"Set EOS token to '<|end|>' (ID: {self.model.config.eos_token_id})")
+                self.tokenizer.pad_token = "<|end|>" 
+                eos_id = self.tokenizer.convert_tokens_to_ids("<|end|>")
+                self.model.config.eos_token_id = eos_id
+                self.model.config.pad_token_id = eos_id
+                # Also set in generation config if it exists
+                if hasattr(self.model, 'generation_config'):
+                    self.model.generation_config.eos_token_id = eos_id
+                    self.model.generation_config.pad_token_id = eos_id
+                print(f"Set EOS token to '<|end|>' (ID: {eos_id})")
             else:
                 if self.tokenizer.pad_token is None:
                     self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -85,15 +89,32 @@ class MicrogliaPruningSystem:
         ])
         self.agents.to(device)
         
-        # DON'T wrap attention initially - this was causing the issue!
-        # We'll only wrap when training starts
+        # Don't wrap initially
         self.wrapped = False
+        self.lora_applied = False
         
         self.activation_cache = {}
         self.training_history = []
         
         print("System initialized successfully!")
         print("Note: Pruning is DISABLED until training starts")
+    
+    def _apply_lora(self):
+        """Apply LoRA BEFORE wrapping attention."""
+        if self.lora_applied:
+            return
+        
+        print("Applying LoRA for parameter-efficient training...")
+        lora_config = LoraConfig(
+            r=8,
+            lora_alpha=16,
+            target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+            lora_dropout=0.05,
+            task_type=TaskType.CAUSAL_LM
+        )
+        self.model = get_peft_model(self.model, lora_config)
+        self.model.print_trainable_parameters()
+        self.lora_applied = True
     
     def _wrap_attention_layers(self):
         """Replace standard attention with pruned attention."""
@@ -108,7 +129,7 @@ class MicrogliaPruningSystem:
                 self.agents[idx],
                 hard_prune=False
             )
-            layer.self_attn.enable_pruning = False  # Explicitly disable
+            layer.self_attn.enable_pruning = False
         self.wrapped = True
     
     def _enable_pruning(self, enable: bool = True):
@@ -129,14 +150,18 @@ class MicrogliaPruningSystem:
              batch_size: int = 2,
              learning_rate: float = 1e-4,
              alpha_schedule: Tuple[float, float] = (0.01, 0.3),
-             use_lora: bool = True,
+             use_lora: bool = False,  # Disable LoRA for simplicity
              save_steps: int = 500):
         """Train the pruning agents on a reasoning dataset."""
         print("\n" + "="*60)
         print("Starting Training")
         print("="*60)
         
-        # NOW wrap attention for training
+        # Apply LoRA first if requested (before wrapping)
+        if use_lora and not self.lora_applied:
+            self._apply_lora()
+        
+        # Then wrap attention
         if not self.wrapped:
             self._wrap_attention_layers()
         
@@ -147,10 +172,9 @@ class MicrogliaPruningSystem:
         dataset = load_dataset(dataset_name, "main")
         
         print("Preprocessing dataset...")
-        # Use much smaller subset to avoid OOM
         train_subset = dataset['train'].select(range(min(500, len(dataset['train']))))
         
-        # Process in smaller batches to avoid OOM during preprocessing
+        # Process in batches to avoid OOM
         processed_examples = []
         batch_size_preprocess = 100
         
@@ -164,22 +188,19 @@ class MicrogliaPruningSystem:
                 prompts,
                 truncation=True,
                 padding='max_length',
-                max_length=128,  # Much shorter
+                max_length=128,
                 return_tensors='pt'
             )
             
-            # Store as list of dicts
             for j in range(len(prompts)):
                 processed_examples.append({
                     'input_ids': encoded['input_ids'][j],
                     'attention_mask': encoded['attention_mask'][j]
                 })
             
-            # Clear memory
             del encoded
             gc.collect()
         
-        # Create simple dataset
         class SimpleDataset(torch.utils.data.Dataset):
             def __init__(self, examples):
                 self.examples = examples
@@ -192,19 +213,6 @@ class MicrogliaPruningSystem:
         
         train_dataset = SimpleDataset(processed_examples)
         print(f"Prepared {len(train_dataset)} training examples")
-        
-        # Apply LoRA
-        if use_lora:
-            print("Applying LoRA for parameter-efficient training...")
-            lora_config = LoraConfig(
-                r=8,
-                lora_alpha=16,
-                target_modules=["q_proj", "v_proj"],
-                lora_dropout=0.05,
-                task_type=TaskType.CAUSAL_LM
-            )
-            self.model = get_peft_model(self.model, lora_config)
-            self.model.print_trainable_parameters()
         
         print("\nSetting up optimizer for pruning agents...")
         optimizer = torch.optim.AdamW(
@@ -266,7 +274,7 @@ class MicrogliaPruningSystem:
                 if step % 10 == 0:
                     torch.cuda.empty_cache()
                 
-                if step >= 30:  # Very short for memory
+                if step >= 30:
                     break
             
             n_steps = min(len(train_loader), 30)
@@ -304,9 +312,11 @@ class MicrogliaPruningSystem:
                 **inputs,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
+                temperature=None,  # Disable temperature for greedy
+                top_p=None,
                 use_cache=False,
-                pad_token_id=self.tokenizer.pad_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,
+                pad_token_id=self.model.config.pad_token_id,
+                eos_token_id=self.model.config.eos_token_id,
                 **kwargs
             )
         
