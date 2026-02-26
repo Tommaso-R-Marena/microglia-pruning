@@ -80,12 +80,14 @@ class MicrogliaPruningSystem:
             self.model = model
             self.tokenizer = None
         
-        print(f"Model has {len(self.model.model.layers)} layers")
+        # Determine layers
+        layers = self.get_layers()
+        print(f"Model has {len(layers)} layers")
         
-        print(f"Initializing {len(self.model.model.layers)} pruning agents...")
+        print(f"Initializing {len(layers)} pruning agents...")
         self.agents = nn.ModuleList([
             MicrogliaAgent(hidden_dim, num_heads, temperature)
-            for _ in range(len(self.model.model.layers))
+            for _ in range(len(layers))
         ])
         self.agents.to(device)
         
@@ -116,13 +118,33 @@ class MicrogliaPruningSystem:
         self.model.print_trainable_parameters()
         self.lora_applied = True
     
+    def get_layers(self):
+        """Get the layers of the model, handling PEFT wrapping."""
+        model = self.model
+        if hasattr(model, "base_model"):
+            model = model.base_model.model
+
+        if hasattr(model, "model"): # Llama, Phi-3, etc.
+            return model.model.layers
+        if hasattr(model, "transformer"): # GPT-2, etc.
+            if hasattr(model.transformer, "h"):
+                return model.transformer.h
+            return model.transformer.layers
+
+        # Fallback for some other models
+        if hasattr(model, "layers"):
+            return model.layers
+
+        raise AttributeError(f"Could not find layers for model type {type(model)}")
+
     def _wrap_attention_layers(self):
         """Replace standard attention with pruned attention."""
         if self.wrapped:
             return
         
+        layers = self.get_layers()
         print("Wrapping attention layers with pruning modules...")
-        for idx, layer in enumerate(self.model.model.layers):
+        for idx, layer in enumerate(layers):
             original_attn = layer.self_attn
             layer.self_attn = PrunedAttention(
                 original_attn, 
@@ -138,11 +160,25 @@ class MicrogliaPruningSystem:
         if not self.wrapped:
             return
         
-        for layer in self.model.model.layers:
+        layers = self.get_layers()
+        for layer in layers:
             if isinstance(layer.self_attn, PrunedAttention):
                 layer.self_attn.enable_pruning = enable
         
         print(f"Pruning {'ENABLED' if enable else 'DISABLED'}")
+
+    def set_hard_prune(self, enable: bool = True):
+        """Enable or disable hard thresholding for pruning (inference)."""
+        if not self.wrapped:
+            print("Warning: Layers not yet wrapped. Hard prune will be set during wrapping.")
+            return
+
+        layers = self.get_layers()
+        for layer in layers:
+            if isinstance(layer.self_attn, PrunedAttention):
+                layer.self_attn.hard_prune = enable
+
+        print(f"Hard pruning {'ENABLED' if enable else 'DISABLED'}")
     
     def train(self,
              dataset_name: str = "gsm8k",
@@ -151,6 +187,7 @@ class MicrogliaPruningSystem:
              learning_rate: float = 1e-4,
              alpha_schedule: Tuple[float, float] = (0.01, 0.3),
              use_lora: bool = False,  # Disable LoRA for simplicity
+             max_steps_per_epoch: int = 30,
              save_steps: int = 500):
         """Train the pruning agents on a reasoning dataset."""
         print("\n" + "="*60)
@@ -248,7 +285,8 @@ class MicrogliaPruningSystem:
                 task_loss = outputs.loss
                 
                 all_masks = []
-                for layer in self.model.model.layers:
+                layers = self.get_layers()
+                for layer in layers:
                     if hasattr(layer.self_attn, 'last_masks') and layer.self_attn.last_masks is not None:
                         all_masks.append(layer.self_attn.last_masks)
                 
@@ -258,6 +296,7 @@ class MicrogliaPruningSystem:
                     total_loss = loss_dict['total_loss']
                     
                     optimizer.zero_grad()
+                    self.model.zero_grad()  # Also clear LoRA gradients
                     total_loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.agents.parameters(), 1.0)
                     optimizer.step()
@@ -274,10 +313,10 @@ class MicrogliaPruningSystem:
                 if step % 10 == 0:
                     torch.cuda.empty_cache()
                 
-                if step >= 30:
+                if step >= max_steps_per_epoch:
                     break
             
-            n_steps = min(len(train_loader), 30)
+            n_steps = min(len(train_loader), max_steps_per_epoch)
             avg_metrics = {k: v/n_steps for k, v in epoch_metrics.items()}
             print(f"Epoch {epoch+1} Summary:")
             print(f"  Task Loss: {avg_metrics['task_loss']:.4f}")
@@ -296,13 +335,17 @@ class MicrogliaPruningSystem:
         print("Training Complete!")
         print("="*60)
     
-    def generate(self, prompt: str, max_new_tokens: int = 256, **kwargs):
-        """Generate text WITHOUT pruning."""
+    def generate(self, prompt: str, max_new_tokens: int = 256, use_pruning: bool = None, **kwargs):
+        """Generate text with optional pruning."""
         if self.tokenizer is None:
             raise ValueError("No tokenizer available")
         
-        # Ensure pruning is OFF
-        self._enable_pruning(False)
+        # Use current system state if not specified
+        if use_pruning is None:
+            use_pruning = self.pruning_enabled
+
+        # Ensure pruning state is correct
+        self._enable_pruning(use_pruning)
         self.model.eval()
         
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
@@ -329,7 +372,8 @@ class MicrogliaPruningSystem:
             return 0.0
         
         all_masks = []
-        for layer in self.model.model.layers:
+        layers = self.get_layers()
+        for layer in layers:
             if hasattr(layer.self_attn, 'last_masks') and layer.self_attn.last_masks is not None:
                 all_masks.append(layer.self_attn.last_masks)
         
@@ -340,11 +384,12 @@ class MicrogliaPruningSystem:
         metrics = compute_efficiency_metrics(masks)
         return metrics['sparsity']
     
-    def evaluate(self, dataset_name: str = "gsm8k", split: str = "test", max_samples: int = 200) -> Dict:
+    def evaluate(self, dataset_name: str = "gsm8k", split: str = "test", max_samples: int = 200, use_pruning: bool = True) -> Dict:
         """Evaluate accuracy on a reasoning benchmark."""
         print(f"\nEvaluating on {dataset_name} ({split} split)...")
         
-        self._enable_pruning(False)
+        # Use provided pruning setting (defaults to True for pruned eval)
+        self._enable_pruning(use_pruning)
         
         dataset = load_dataset(dataset_name, "main", split=split)
         

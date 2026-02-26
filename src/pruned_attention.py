@@ -47,9 +47,8 @@ class PrunedAttention(nn.Module):
             **kwargs
         )
         
-        # Only apply pruning if explicitly enabled (during training)
-        # This prevents breaking generation during inference
-        if not self.enable_pruning or not self.training:
+        # Only apply pruning if explicitly enabled
+        if not self.enable_pruning:
             return attn_outputs
         
         # Unpack outputs (format varies by model)

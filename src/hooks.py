@@ -45,9 +45,21 @@ def register_hooks(model: nn.Module, activation_cache: Dict[str, Any]) -> list:
     """
     handles = []
     
+    # Get layers, handling PEFT wrapping and different model architectures
+    if hasattr(model, "base_model"):
+        model = model.base_model.model
+
+    if hasattr(model, "model"):
+        layers = model.model.layers
+    elif hasattr(model, "transformer"):
+        layers = model.transformer.h if hasattr(model.transformer, "h") else model.transformer.layers
+    elif hasattr(model, "layers"):
+        layers = model.layers
+    else:
+        raise AttributeError(f"Could not find layers for model type {type(model)}")
+
     # Register hooks on all attention layers
-    # This assumes the model follows the standard transformer structure
-    for idx, layer in enumerate(model.model.layers):
+    for idx, layer in enumerate(layers):
         hook = create_activation_hook(idx, activation_cache)
         handle = layer.self_attn.register_forward_hook(hook)
         handles.append(handle)

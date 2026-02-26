@@ -38,7 +38,7 @@ def main():
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=4,
+        default=2,
         help="Training batch size"
     )
     parser.add_argument(
@@ -83,6 +83,12 @@ def main():
         default=True,
         help="Use LoRA for efficient fine-tuning"
     )
+    parser.add_argument(
+        "--max_steps_per_epoch",
+        type=int,
+        default=30,
+        help="Maximum steps per epoch"
+    )
     
     args = parser.parse_args()
     
@@ -117,7 +123,8 @@ def main():
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         alpha_schedule=(args.alpha_min, args.alpha_max),
-        use_lora=args.use_lora
+        use_lora=args.use_lora,
+        max_steps_per_epoch=args.max_steps_per_epoch
     )
     
     # Save checkpoint

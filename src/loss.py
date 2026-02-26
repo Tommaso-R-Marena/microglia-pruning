@@ -44,7 +44,9 @@ def compute_pruning_loss(task_loss: torch.Tensor,
                      (1 - masks) * (1 - masks + eps).log()).mean()
     
     # Combine losses
-    total_loss = task_loss + alpha * sparsity_loss - beta * mask_entropy
+    # Use + beta to minimize entropy (encourage binary decisions 0 or 1)
+    # The original - beta was encouraging max entropy (pushing toward 0.5)
+    total_loss = task_loss + alpha * sparsity_loss + beta * mask_entropy
     
     return {
         'total_loss': total_loss,
