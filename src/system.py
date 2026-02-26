@@ -15,6 +15,7 @@ from .agent import MicrogliaAgent
 from .hooks import register_hooks, remove_hooks
 from .pruned_attention import PrunedAttention
 from .loss import compute_pruning_loss, get_alpha_schedule, compute_efficiency_metrics
+from .utils import get_model_layers
 
 
 class MicrogliaPruningSystem:
@@ -120,22 +121,7 @@ class MicrogliaPruningSystem:
     
     def get_layers(self):
         """Get the layers of the model, handling PEFT wrapping."""
-        model = self.model
-        if hasattr(model, "base_model"):
-            model = model.base_model.model
-
-        if hasattr(model, "model"): # Llama, Phi-3, etc.
-            return model.model.layers
-        if hasattr(model, "transformer"): # GPT-2, etc.
-            if hasattr(model.transformer, "h"):
-                return model.transformer.h
-            return model.transformer.layers
-
-        # Fallback for some other models
-        if hasattr(model, "layers"):
-            return model.layers
-
-        raise AttributeError(f"Could not find layers for model type {type(model)}")
+        return get_model_layers(self.model)
 
     def _wrap_attention_layers(self):
         """Replace standard attention with pruned attention."""

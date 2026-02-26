@@ -3,6 +3,7 @@
 from typing import Dict, Any
 import torch
 import torch.nn as nn
+from .utils import get_model_layers
 
 
 def create_activation_hook(layer_idx: int, activation_cache: Dict[str, Any]):
@@ -46,17 +47,7 @@ def register_hooks(model: nn.Module, activation_cache: Dict[str, Any]) -> list:
     handles = []
     
     # Get layers, handling PEFT wrapping and different model architectures
-    if hasattr(model, "base_model"):
-        model = model.base_model.model
-
-    if hasattr(model, "model"):
-        layers = model.model.layers
-    elif hasattr(model, "transformer"):
-        layers = model.transformer.h if hasattr(model.transformer, "h") else model.transformer.layers
-    elif hasattr(model, "layers"):
-        layers = model.layers
-    else:
-        raise AttributeError(f"Could not find layers for model type {type(model)}")
+    layers = get_model_layers(model)
 
     # Register hooks on all attention layers
     for idx, layer in enumerate(layers):
