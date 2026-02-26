@@ -3,6 +3,7 @@
 from typing import Dict, Any
 import torch
 import torch.nn as nn
+from .utils import get_model_layers
 
 
 def create_activation_hook(layer_idx: int, activation_cache: Dict[str, Any]):
@@ -45,9 +46,11 @@ def register_hooks(model: nn.Module, activation_cache: Dict[str, Any]) -> list:
     """
     handles = []
     
+    # Get layers, handling PEFT wrapping and different model architectures
+    layers = get_model_layers(model)
+
     # Register hooks on all attention layers
-    # This assumes the model follows the standard transformer structure
-    for idx, layer in enumerate(model.model.layers):
+    for idx, layer in enumerate(layers):
         hook = create_activation_hook(idx, activation_cache)
         handle = layer.self_attn.register_forward_hook(hook)
         handles.append(handle)

@@ -54,6 +54,16 @@ def main():
         default=128,
         help="Hidden dimension for agents"
     )
+    parser.add_argument(
+        "--hard_prune",
+        action="store_true",
+        help="Use hard thresholding for pruning"
+    )
+    parser.add_argument(
+        "--no_pruning",
+        action="store_true",
+        help="Disable pruning for evaluation (baseline)"
+    )
     
     args = parser.parse_args()
     
@@ -80,9 +90,16 @@ def main():
     print(f"Loading checkpoint from {args.model_path}...")
     system.load(args.model_path)
     
+    # Configure pruning
+    system.set_hard_prune(args.hard_prune)
+
     # Evaluate
     print("\nRunning evaluation...")
-    metrics = system.evaluate(dataset_name=args.dataset, split=args.split)
+    metrics = system.evaluate(
+        dataset_name=args.dataset,
+        split=args.split,
+        use_pruning=not args.no_pruning
+    )
     
     # Print results
     print("\n" + "="*60)

@@ -71,6 +71,16 @@ def main():
         default="results/",
         help="Directory to save results"
     )
+    parser.add_argument(
+        "--hard_prune",
+        action="store_true",
+        help="Use hard thresholding for pruning"
+    )
+    parser.add_argument(
+        "--no_pruning",
+        action="store_true",
+        help="Disable pruning for benchmark (baseline measurement)"
+    )
     
     args = parser.parse_args()
     
@@ -91,6 +101,10 @@ def main():
     system = MicrogliaPruningSystem(model=args.base_model)
     system.load(args.model_path)
     
+    # Configure pruning for benchmark
+    system._enable_pruning(not args.no_pruning)
+    system.set_hard_prune(args.hard_prune)
+
     # Test prompt
     test_prompt = "What is 15% of 240?"
     

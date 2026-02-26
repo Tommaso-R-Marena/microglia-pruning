@@ -62,6 +62,7 @@ class TestPrunedAttention:
         attn = DummyAttention(hidden_dim=64, num_heads=4)
         agent = MicrogliaAgent(hidden_dim=128, num_heads=4)
         pruned_attn = PrunedAttention(attn, agent)
+        pruned_attn.enable_pruning = True
         
         x = torch.randn(2, 10, 64)
         
@@ -72,15 +73,14 @@ class TestPrunedAttention:
         output_original, _ = attn(x, output_attentions=True)
         
         # Outputs should be different (masks applied)
-        # Note: This might fail if masks are all 1.0 by chance
-        # In practice, this is very unlikely
-        # assert not torch.allclose(output_pruned, output_original)
+        assert not torch.allclose(output_pruned, output_original)
     
     def test_hard_pruning(self):
         """Test hard pruning mode."""
         attn = DummyAttention(hidden_dim=64, num_heads=4)
         agent = MicrogliaAgent(hidden_dim=128, num_heads=4)
         pruned_attn = PrunedAttention(attn, agent, hard_prune=True)
+        pruned_attn.enable_pruning = True
         
         # Set to eval mode
         pruned_attn.eval()
@@ -98,6 +98,7 @@ class TestPrunedAttention:
         attn = DummyAttention(hidden_dim=64, num_heads=4)
         agent = MicrogliaAgent(hidden_dim=128, num_heads=4)
         pruned_attn = PrunedAttention(attn, agent)
+        pruned_attn.enable_pruning = True
         
         x = torch.randn(2, 10, 64, requires_grad=True)
         output, _ = pruned_attn(x)
@@ -110,6 +111,43 @@ class TestPrunedAttention:
         assert x.grad is not None
         for param in agent.parameters():
             assert param.grad is not None
+
+    def test_eval_mode_pruning(self):
+        """Test that pruning still works in eval mode."""
+        attn = DummyAttention(hidden_dim=64, num_heads=4)
+        agent = MicrogliaAgent(hidden_dim=128, num_heads=4)
+        pruned_attn = PrunedAttention(attn, agent)
+        pruned_attn.enable_pruning = True
+
+        # Set to eval mode
+        pruned_attn.eval()
+
+        x = torch.randn(2, 10, 64)
+
+        # Forward pass in eval mode
+        output_eval, _ = pruned_attn(x)
+
+        # Without pruning
+        output_original, _ = attn(x, output_attentions=True)
+
+        # Pruning should still be applied even in eval mode
+        assert not torch.allclose(output_eval, output_original)
+
+    def test_hard_pruning_inference(self):
+        """Test that hard pruning produces binary masks during inference."""
+        attn = DummyAttention(hidden_dim=64, num_heads=4)
+        agent = MicrogliaAgent(hidden_dim=128, num_heads=4)
+        pruned_attn = PrunedAttention(attn, agent, hard_prune=True)
+        pruned_attn.enable_pruning = True
+
+        pruned_attn.eval()
+
+        x = torch.randn(2, 10, 64)
+        _ = pruned_attn(x)
+
+        # Check that last_masks are binary (0.0 or 1.0)
+        masks = pruned_attn.last_masks
+        assert torch.all((masks == 0.0) | (masks == 1.0))
 
 
 if __name__ == "__main__":
