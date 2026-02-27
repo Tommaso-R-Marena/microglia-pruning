@@ -7,6 +7,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 from src.system import MicrogliaPruningSystem
+from src.utils import set_seed
 
 
 def main():
@@ -92,6 +93,9 @@ def main():
     
     args = parser.parse_args()
     
+    # Set seed for reproducibility
+    set_seed(42)
+
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     

@@ -223,19 +223,30 @@ We use **curriculum learning** - α increases from 0.01 to 0.3 over training:
 - Mid epochs: Start pruning less important heads
 - Late epochs: Stabilize pruning pattern
 
+### Methodology
+
+Our system implements a structured pruning approach where entire attention heads are dynamically masked during the forward pass. The decision-making process is governed by a set of "Microglia Agents"—lightweight MLP networks that monitor the internal state of the transformer.
+
+#### Mathematical Formulation
+
+The pruning decision for head $h$ in layer $l$ is modeled as a soft gate $m_{l,h} \in [0, 1]$, computed as:
+$$m_{l,h} = \sigma\left(\text{Agent}_l(\phi_{l,h}) / T\right)$$
+where $\phi_{l,h}$ represents the activation statistics for the head, and $T$ is a temperature parameter controlling the sharpness of the mask.
+
+The total training objective $L_{total}$ combines the task-specific cross-entropy loss $L_{task}$ with regularization terms for sparsity and mask stability:
+$$L_{total} = L_{task} + \alpha \cdot \frac{1}{LH}\sum_{l,h} m_{l,h} + \beta \cdot H(m)$$
+where $\alpha$ is the sparsity pressure (scheduled via curriculum learning) and $H(m)$ is the binary entropy of the masks, which encourages the agents to make decisive (0 or 1) pruning choices.
+
 ### Activation Statistics
 
-For each attention head, we compute:
+For each attention head, we compute a four-dimensional feature vector $\phi_{l,h}$:
 
-1. **Activation Norm**: `||h||_2` - magnitude of hidden state activity
-   - High norm → head is active
-   - Low norm → head is dormant
+1. **Mean Activation Norm**: $\mathbb{E}[\|h\|_2]$ - average magnitude of hidden state activity.
+2. **Activation Standard Deviation**: $\text{std}(\|h\|_2)$ - variability of activity across the sequence.
+3. **Attention Entropy**: $-\sum p \log p$ - the concentration of the attention distribution.
+4. **Max Attention**: $\max(p)$ - the peak attention score, indicating focus on specific tokens.
 
-2. **Attention Entropy**: `-Σ p log p` - spread of attention distribution
-   - Low entropy → focused attention  
-   - High entropy → scattered attention
-
-These statistics (2 per head) are fed to the MicrogliaAgent.
+These statistics provide a comprehensive "health report" of each head's contribution to the current input.
 
 ### Why Head-Level Pruning?
 

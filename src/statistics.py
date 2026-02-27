@@ -7,17 +7,19 @@ import torch.nn.functional as F
 def compute_layer_stats(hidden_states: torch.Tensor, attn_weights: torch.Tensor) -> torch.Tensor:
     """Compute per-head statistics from layer activations.
     
-    We compute two key statistics for each attention head:
-    1. Activation Norm: Magnitude of hidden state activity (high = active, low = dormant)
-    2. Attention Entropy: Spread of attention distribution (low = focused, high = scattered)
+    We compute four key statistics for each attention head:
+    1. Activation Norm (Mean): Magnitude of hidden state activity.
+    2. Activation Std: Variability of hidden state activity.
+    3. Attention Entropy: Spread of attention distribution.
+    4. Max Attention: Peak attention score (indicates focusing on specific tokens).
     
     Args:
         hidden_states: Tensor of shape (batch, seq_len, hidden_dim)
         attn_weights: Tensor of shape (batch, num_heads, seq_len, seq_len)
         
     Returns:
-        stats: Tensor of shape (batch, 2*num_heads) containing concatenated
-               activation norms and attention entropy for each head
+        stats: Tensor of shape (batch, 4*num_heads) containing concatenated
+               activation statistics and attention metrics for each head.
     """
     batch_size = hidden_states.shape[0]
     num_heads = attn_weights.shape[1]
@@ -30,11 +32,15 @@ def compute_layer_stats(hidden_states: torch.Tensor, attn_weights: torch.Tensor)
     # Reshape: (batch, seq_len, hidden_dim) -> (batch, seq_len, num_heads, head_dim)
     hidden_states_heads = hidden_states.view(batch_size, -1, num_heads, head_dim)
     
-    # Statistic 1: Per-head activation norms
+    # Statistic 1: Per-head activation norms (Mean)
     # Shape: (batch, num_heads)
-    act_norms = hidden_states_heads.norm(dim=-1).mean(dim=1)
+    norms = hidden_states_heads.norm(dim=-1)
+    act_norms_mean = norms.mean(dim=1)
     
-    # Statistic 2: Attention entropy per head
+    # Statistic 2: Per-head activation norms (Std)
+    act_norms_std = norms.std(dim=1)
+
+    # Statistic 3: Attention entropy per head
     # Add small epsilon to avoid log(0)
     attn_probs = attn_weights + 1e-10
     
@@ -42,9 +48,12 @@ def compute_layer_stats(hidden_states: torch.Tensor, attn_weights: torch.Tensor)
     # Shape: (batch, num_heads, seq_len, seq_len) -> (batch, num_heads)
     entropy = -(attn_probs * attn_probs.log()).sum(dim=-1).mean(dim=-1)
     
+    # Statistic 4: Max attention per head
+    max_attn = attn_weights.max(dim=-1)[0].mean(dim=-1)
+
     # Concatenate statistics
-    # Shape: (batch, 2*num_heads)
-    stats = torch.cat([act_norms, entropy], dim=-1)
+    # Shape: (batch, 4*num_heads)
+    stats = torch.cat([act_norms_mean, act_norms_std, entropy, max_attn], dim=-1)
     
     return stats
 
