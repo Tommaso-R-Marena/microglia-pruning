@@ -6,35 +6,55 @@ from .statistics import compute_layer_stats
 from .agent import MicrogliaAgent
 
 
+from typing import Tuple, Optional
+
 class PrunedAttention(nn.Module):
-    """Wraps attention layer with learned dynamic pruning.
+    """Wraps an attention layer with learned dynamic pruning mechanisms.
     
-    During forward pass:
-    1. Run standard attention
-    2. Compute activation statistics (only during training)
-    3. Use agent to predict which heads to keep
-    4. Apply masks to attention output
-    
-    Important: Only applies pruning during training to avoid breaking generation
+    During the forward pass, this module:
+    1. Executes the standard attention mechanism.
+    2. Computes per-head activation statistics.
+    3. Utilizes a MicrogliaAgent to predict head-level pruning masks.
+    4. Applies these masks to the attention output.
     """
     
     def __init__(self, original_attn: nn.Module, agent: MicrogliaAgent, hard_prune: bool = False):
+        """Initializes the PrunedAttention module.
+
+        Args:
+            original_attn (nn.Module): The original attention layer to wrap.
+            agent (MicrogliaAgent): The agent network that predicts pruning masks.
+            hard_prune (bool): Whether to apply a hard binary threshold (0.5) to masks.
+        """
         super().__init__()
-        self.attn = original_attn
-        self.agent = agent
-        self.hard_prune = hard_prune
-        self.last_masks = None  # Store masks for monitoring
-        self.enable_pruning = False  # Only enable during training
+        self.attn: nn.Module = original_attn
+        self.agent: MicrogliaAgent = agent
+        self.hard_prune: bool = hard_prune
+        self.last_masks: Optional[torch.Tensor] = None
+        self.last_stats: Optional[torch.Tensor] = None
+        self.enable_pruning: bool = False
         
     def forward(self, 
                 hidden_states: torch.Tensor,
-                attention_mask: torch.Tensor = None,
-                position_ids: torch.Tensor = None,
-                past_key_value = None,
+                attention_mask: Optional[torch.Tensor] = None,
+                position_ids: Optional[torch.Tensor] = None,
+                past_key_value: Optional[Tuple] = None,
                 output_attentions: bool = False,
                 use_cache: bool = False,
-                **kwargs) -> tuple:
-        """Forward with optional dynamic head pruning."""
+                **kwargs) -> Tuple:
+        """Forward pass with optional dynamic head pruning.
+
+        Args:
+            hidden_states (torch.Tensor): Input hidden states.
+            attention_mask (torch.Tensor, optional): Attention mask.
+            position_ids (torch.Tensor, optional): Position IDs.
+            past_key_value (Tuple, optional): Cached key/values.
+            output_attentions (bool): Whether to return attention weights.
+            use_cache (bool): Whether to use KV cache.
+
+        Returns:
+            Tuple: Attention output and optional metadata.
+        """
         
         # Run original attention
         attn_outputs = self.attn(
@@ -74,6 +94,7 @@ class PrunedAttention(nn.Module):
                 
                 # Store for monitoring
                 self.last_masks = masks.detach()
+                self.last_stats = stats.detach()
                 
                 # Apply masks to attention output
                 batch_size, seq_len, hidden_dim = attn_output.shape

@@ -23,9 +23,9 @@ class TestMicrogliaAgent:
         """Test forward pass output shape."""
         agent = MicrogliaAgent(hidden_dim=128, num_heads=32)
         
-        # Create dummy input: (batch_size, 2*num_heads)
+        # Create dummy input: (batch_size, 4*num_heads)
         batch_size = 4
-        stats = torch.randn(batch_size, 2 * 32)
+        stats = torch.randn(batch_size, 4 * 32)
         
         # Forward pass
         masks = agent(stats)
@@ -37,7 +37,7 @@ class TestMicrogliaAgent:
         """Test that masks are in [0, 1] range."""
         agent = MicrogliaAgent(hidden_dim=128, num_heads=32)
         
-        stats = torch.randn(4, 2 * 32)
+        stats = torch.randn(4, 4 * 32)
         masks = agent(stats)
         
         # Masks should be between 0 and 1 (sigmoid output)
@@ -46,7 +46,7 @@ class TestMicrogliaAgent:
     
     def test_temperature_effect(self):
         """Test that temperature affects mask sharpness."""
-        stats = torch.randn(4, 2 * 32)
+        stats = torch.randn(4, 4 * 32)
         
         # Low temperature = sharper masks (closer to 0 or 1)
         agent_low = MicrogliaAgent(hidden_dim=128, num_heads=32, temperature=0.1)
@@ -76,7 +76,7 @@ class TestMicrogliaAgent:
         """Test that gradients flow through agent."""
         agent = MicrogliaAgent(hidden_dim=128, num_heads=32)
         
-        stats = torch.randn(4, 2 * 32, requires_grad=True)
+        stats = torch.randn(4, 4 * 32, requires_grad=True)
         masks = agent(stats)
         
         # Compute dummy loss

@@ -4,29 +4,25 @@ import torch
 import torch.nn.functional as F
 
 
+from typing import Dict, Tuple
+
 def compute_pruning_loss(task_loss: torch.Tensor,
                         masks: torch.Tensor,
                         alpha: float = 0.1,
-                        beta: float = 0.01) -> dict:
-    """Compute combined loss for training pruning agents.
+                        beta: float = 0.01) -> Dict[str, any]:
+    """Computes the combined loss for training pruning agents.
     
-    The total loss has three components:
-    1. Task loss: Preserve model accuracy on the target task
-    2. Sparsity loss: Encourage pruning (push masks toward 0)
-    3. Entropy loss: Prevent masks from getting stuck at 0.5
+    The total loss is formulated as:
+    L_total = L_task + α * L_sparsity + β * L_entropy
     
     Args:
-        task_loss: Cross-entropy loss on answer tokens (scalar)
-        masks: Pruning masks of shape (batch, num_heads) with values in [0, 1]
-        alpha: Weight for sparsity loss (higher = more aggressive pruning)
-        beta: Weight for entropy regularization
+        task_loss (torch.Tensor): Cross-entropy loss on answer tokens (scalar).
+        masks (torch.Tensor): Pruning masks of shape (batch, num_heads) with values in [0, 1].
+        alpha (float): Weight for sparsity loss (higher = more aggressive pruning).
+        beta (float): Weight for entropy regularization (minimizing entropy pushes masks to 0 or 1).
         
     Returns:
-        dict containing:
-            - 'total_loss': Combined loss for backprop
-            - 'task_loss': Task accuracy component
-            - 'sparsity_loss': Pruning encouragement component
-            - 'entropy_loss': Mask stability component
+        Dict[str, any]: A dictionary containing the total loss and its components.
     """
     # Component 1: Task loss (from language modeling objective)
     # Already computed - just use it
@@ -59,21 +55,19 @@ def compute_pruning_loss(task_loss: torch.Tensor,
 def get_alpha_schedule(epoch: int, max_epochs: int, 
                       alpha_min: float = 0.01, 
                       alpha_max: float = 0.3) -> float:
-    """Get sparsity weight for curriculum learning.
+    """Calculates the sparsity weight (alpha) for curriculum learning.
     
-    The pruning pressure (alpha) increases linearly over training:
-    - Early epochs: Low alpha -> learn which heads are important
-    - Mid epochs: Medium alpha -> gradually prune less important heads
-    - Late epochs: High alpha -> stabilize pruning pattern
+    The pruning pressure (alpha) increases linearly over training to allow the
+    agents to first identify head importance before enforcing sparsity.
     
     Args:
-        epoch: Current epoch (0-indexed)
-        max_epochs: Total number of epochs
-        alpha_min: Starting value of alpha
-        alpha_max: Final value of alpha
+        epoch (int): Current epoch (0-indexed).
+        max_epochs (int): Total number of epochs.
+        alpha_min (float): Starting value of alpha.
+        alpha_max (float): Final value of alpha.
         
     Returns:
-        alpha: Sparsity weight for current epoch
+        float: The sparsity weight for the current epoch.
     """
     # Linear schedule
     progress = epoch / max(max_epochs - 1, 1)
@@ -82,17 +76,15 @@ def get_alpha_schedule(epoch: int, max_epochs: int,
     return alpha
 
 
-def compute_efficiency_metrics(masks: torch.Tensor) -> dict:
-    """Compute pruning efficiency metrics.
+def compute_efficiency_metrics(masks: torch.Tensor) -> Dict[str, float]:
+    """Computes pruning efficiency metrics.
     
     Args:
-        masks: Pruning masks of shape (batch, num_heads)
+        masks (torch.Tensor): Pruning masks of shape (batch, num_heads).
         
     Returns:
-        dict containing:
-            - 'sparsity': Fraction of heads pruned (using 0.5 threshold)
-            - 'mean_mask': Average mask value
-            - 'active_heads': Average number of active heads per sample
+        Dict[str, float]: A dictionary containing sparsity, mean mask value,
+            and average number of active heads.
     """
     with torch.no_grad():
         # Binary masks for counting
