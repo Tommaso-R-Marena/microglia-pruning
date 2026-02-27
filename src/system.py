@@ -486,6 +486,9 @@ class MicrogliaPruningSystem:
         self.model.eval()
         results_list = []
         
+        if max_samples is None:
+            max_samples = len(dataset)
+
         progress_bar = tqdm(dataset.select(range(min(max_samples, len(dataset)))), desc="Evaluating")
         
         with torch.no_grad():

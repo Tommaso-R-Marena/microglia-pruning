@@ -82,12 +82,21 @@ class PrunedAttention(nn.Module):
         # If we have attention weights, compute stats and apply pruning
         if attn_weights is not None:
             try:
+                # Store original dtype to cast back later
+                original_dtype = hidden_states.dtype
+
                 # Compute per-head statistics
                 stats = compute_layer_stats(hidden_states, attn_weights)
                 
+                # Ensure stats are float32 for the agent
+                stats = stats.to(torch.float32)
+
                 # Get pruning masks from agent
                 masks = self.agent(stats)  # (batch, num_heads)
                 
+                # Cast masks back to original dtype for application
+                masks = masks.to(original_dtype)
+
                 # Apply hard threshold in eval mode
                 if self.hard_prune and not self.training:
                     masks = (masks > 0.5).float()
