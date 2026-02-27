@@ -78,7 +78,8 @@ class TestSystemIntegration:
         assert system.wrapped
 
         # Check that layers were replaced
-        for layer in system.model.model.layers:
+        layers = system.get_layers()
+        for layer in layers:
             from src.pruned_attention import PrunedAttention
             assert isinstance(layer.self_attn, PrunedAttention)
 
@@ -121,9 +122,11 @@ class TestSystemIntegration:
         system._wrap_attention_layers()
 
         system.set_hard_prune(True)
-        for layer in system.model.model.layers:
+        layers = system.get_layers()
+        for layer in layers:
             assert layer.self_attn.hard_prune == True
 
         system.set_hard_prune(False)
-        for layer in system.model.model.layers:
+        layers = system.get_layers()
+        for layer in layers:
             assert layer.self_attn.hard_prune == False

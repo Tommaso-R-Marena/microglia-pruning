@@ -16,7 +16,11 @@ def get_model_layers(model: nn.Module):
     """
     # Handle PEFT wrapping
     if hasattr(model, "base_model"):
-        model = model.base_model.model
+        if hasattr(model.base_model, "model"):
+            model = model.base_model.model
+        else:
+            # For some models, base_model is the internal model itself
+            model = model.base_model
 
     # Standard Transformers architectures
     if hasattr(model, "model"): # Llama, Phi-3, etc.
