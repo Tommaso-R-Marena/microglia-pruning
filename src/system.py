@@ -103,9 +103,10 @@ class MicrogliaPruningSystem:
         self.logger.info(f"Model has {len(layers)} layers")
         
         self.logger.info(f"Initializing {len(layers)} pruning agents...")
+        total_layers = len(layers)
         self.agents = nn.ModuleList([
-            MicrogliaAgent(hidden_dim, num_heads, temperature)
-            for _ in range(len(layers))
+            MicrogliaAgent(hidden_dim, num_heads, temperature, num_layers=total_layers, layer_idx=layer_idx)
+            for layer_idx in range(total_layers)
         ])
         self.agents.to(device)
         
