@@ -1,5 +1,11 @@
-"""ONNX export helpers."""
+"""
+Microglia-Inspired Dynamic Pruning for Reasoning Models
 
+Authors: Tommaso R. Marena (The Catholic University of America)
+         Panos Ketonis (Yale University)
+
+Copyright (c) 2026
+"""
 from __future__ import annotations
 
 from pathlib import Path

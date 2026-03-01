@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
-  { name = "Tommaso R. Marena" }
+  { name = "Tommaso R. Marena, Panos Ketonis", email = "marena@cua.edu" }
 ]
 dependencies = [
   "torch==2.3.1",

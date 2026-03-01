@@ -2,6 +2,7 @@
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Tommaso-R-Marena/microglia-pruning/blob/main/notebooks/microglia_pruning_demo.ipynb)
 [![Rigorous Experiment](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Tommaso-R-Marena/microglia-pruning/blob/main/notebooks/rigorous_experiment.ipynb)
+[![Complete Experimental Pipeline](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Tommaso-R-Marena/microglia-pruning/blob/main/notebooks/complete_experiments.ipynb)
 
 A neural network pruning system inspired by microglial synaptic pruning in the brain. This project implements dynamic, learnable attention head pruning for transformer-based reasoning models, achieving significant efficiency improvements while preserving accuracy.
 
@@ -79,7 +80,7 @@ pip install -e .[dev]
 
 ### Run Experiments in Colab
 
-We provide two interactive notebooks:
+We provide three interactive notebooks:
 
 **1. Quick Demo** (⏱️ 20-30 min) - [Open in Colab](https://colab.research.google.com/github/Tommaso-R-Marena/microglia-pruning/blob/main/notebooks/microglia_pruning_demo.ipynb)
 - Fast introduction to the system
@@ -88,8 +89,7 @@ We provide two interactive notebooks:
 - Perfect for getting started
 
 **2. Rigorous Experiment** (⏱️ 2-3 hours) - [Open in Colab](https://colab.research.google.com/github/Tommaso-R-Marena/microglia-pruning/blob/main/notebooks/rigorous_experiment.ipynb)
-- **Publication-quality evaluation**
-- Proper baseline measurement (unpruned model)
+- Publication-quality evaluation
 - Full dataset evaluation (1,319 test examples)
 - Statistical significance testing (bootstrap CIs, t-tests)
 - Ablation studies (temperature, sparsity weight)
@@ -97,12 +97,22 @@ We provide two interactive notebooks:
 - Comprehensive visualizations (6-panel summary)
 - Reproducible with fixed seeds
 
-**Choose the rigorous notebook if you want:**
-- Statistically validated results
-- Hyperparameter ablations
-- Per-layer pruning analysis
-- Publication-ready figures
-- Full experimental methodology
+**3. Complete Experimental Pipeline** (⏱️ 3-4 hours) - [Open in Colab](https://colab.research.google.com/github/Tommaso-R-Marena/microglia-pruning/blob/main/notebooks/complete_experiments.ipynb)  ⭐ **NEW: ALL-IN-ONE NOTEBOOK**
+- **Everything from Rigorous Experiment PLUS:**
+- Multi-seed training for robustness
+- Latency benchmarking with CUDA events
+- Full ablation study (hidden_dim, temperature, hard pruning)
+- Pareto frontier analysis (accuracy-latency tradeoffs)
+- Lottery ticket hypothesis analysis
+- Automatic result exporting and checkpointing
+- Google Drive integration for auto-save
+- Publication-ready figures (300 DPI)
+- **Recommended for paper submissions**
+
+**Choose based on your goal:**
+- Learning the system → Quick Demo
+- Validating results → Rigorous Experiment
+- Full paper results → Complete Pipeline ⭐
 
 ### Python API
 
@@ -139,6 +149,7 @@ print(f"Accuracy: {results['accuracy']:.2%}")
 - [Getting Started](docs/getting_started.md)
 - [Advanced Features](docs/advanced_features.md)
 - [Production Deployment](docs/production_deployment.md)
+- [Running Complete Experiments](docs/running_complete_experiments.md)
 
 ## Testing
 
@@ -408,7 +419,8 @@ If you use this code in your research, please cite:
 ```bibtex
 @software{marena2026microglia,
   title={Microglia-Inspired Dynamic Pruning for Reasoning Models},
-  author={Marena, Tommaso R. and Ketonis},
+  author={Marena, Tommaso R. and Ketonis, Panos},
+  institution={{The Catholic University of America} and {Yale University}},
   year={2026},
   url={https://github.com/Tommaso-R-Marena/microglia-pruning}
 }

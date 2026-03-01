@@ -9,8 +9,8 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 setup(
     name="microglia-pruning",
     version="0.1.0",
-    author="Tommaso R. Marena, Ketonis",
-    author_email="",
+    author="Tommaso R. Marena, Panos Ketonis",
+    author_email="marena@cua.edu",
     description="Microglia-Inspired Dynamic Pruning for Reasoning Models",
     long_description=long_description,
     long_description_content_type="text/markdown",
