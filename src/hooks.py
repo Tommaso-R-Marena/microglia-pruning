@@ -1,5 +1,11 @@
-"""PyTorch hooks for capturing layer activations."""
+"""
+Microglia-Inspired Dynamic Pruning for Reasoning Models
 
+Authors: Tommaso R. Marena (The Catholic University of America)
+         Panos Ketonis (Yale University)
+
+Copyright (c) 2026
+"""
 from typing import Dict, Any
 import torch
 import torch.nn as nn

@@ -1,13 +1,11 @@
-"""Theoretical analysis helpers linking dynamic pruning to lottery-ticket style behavior.
-
-Example:
-    >>> import numpy as np
-    >>> from src.theory import analyze_lottery_ticket_behavior
-    >>> masks = np.ones((2, 1, 2), dtype=float)
-    >>> analyze_lottery_ticket_behavior(masks).winning_ticket_score
-    1.0
 """
+Microglia-Inspired Dynamic Pruning for Reasoning Models
 
+Authors: Tommaso R. Marena (The Catholic University of America)
+         Panos Ketonis (Yale University)
+
+Copyright (c) 2026
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass

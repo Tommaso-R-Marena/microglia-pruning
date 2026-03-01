@@ -1,5 +1,11 @@
-"""Pruned attention wrapper with dynamic masking."""
+"""
+Microglia-Inspired Dynamic Pruning for Reasoning Models
 
+Authors: Tommaso R. Marena (The Catholic University of America)
+         Panos Ketonis (Yale University)
+
+Copyright (c) 2026
+"""
 import torch
 import torch.nn as nn
 from .statistics import compute_layer_stats

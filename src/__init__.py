@@ -1,5 +1,11 @@
-"""Microglia-Inspired Dynamic Pruning for Reasoning Models."""
+"""
+Microglia-Inspired Dynamic Pruning for Reasoning Models
 
+Authors: Tommaso R. Marena (The Catholic University of America)
+         Panos Ketonis (Yale University)
+
+Copyright (c) 2026
+"""
 from .agent import MicrogliaAgent
 from .hooks import create_activation_hook, register_hooks
 from .pruned_attention import PrunedAttention
