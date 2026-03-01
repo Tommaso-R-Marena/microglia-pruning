@@ -90,6 +90,13 @@ def main():
         default=30,
         help="Maximum steps per epoch"
     )
+    parser.add_argument(
+        "--precision",
+        type=str,
+        default="fp32",
+        choices=["fp32", "fp16", "bf16"],
+        help="Mixed precision mode"
+    )
     
     args = parser.parse_args()
     
@@ -128,7 +135,8 @@ def main():
         learning_rate=args.learning_rate,
         alpha_schedule=(args.alpha_min, args.alpha_max),
         use_lora=args.use_lora,
-        max_steps_per_epoch=args.max_steps_per_epoch
+        max_steps_per_epoch=args.max_steps_per_epoch,
+        precision=args.precision
     )
     
     # Save checkpoint

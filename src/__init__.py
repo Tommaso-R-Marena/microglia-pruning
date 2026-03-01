@@ -6,6 +6,8 @@ from .pruned_attention import PrunedAttention
 from .statistics import compute_layer_stats
 from .loss import compute_pruning_loss
 from .system import MicrogliaPruningSystem
+from .inference import InferenceEngine, GenerationConfig
+from .export import export_to_onnx
 
 __version__ = "0.1.0"
 
@@ -17,4 +19,7 @@ __all__ = [
     "compute_layer_stats",
     "compute_pruning_loss",
     "MicrogliaPruningSystem",
+    "InferenceEngine",
+    "GenerationConfig",
+    "export_to_onnx",
 ]
