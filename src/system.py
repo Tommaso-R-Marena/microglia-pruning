@@ -6,6 +6,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from datasets import load_dataset
 from peft import LoraConfig, get_peft_model, TaskType
 from typing import Optional, Tuple, Dict
+from contextlib import nullcontext
 from tqdm import tqdm
 import re
 import os
@@ -193,7 +194,8 @@ class MicrogliaPruningSystem:
              use_lora: bool = True,
              max_steps_per_epoch: int = 30,
              val_split: float = 0.1,
-             early_stopping_patience: int = 3):
+             early_stopping_patience: int = 3,
+             precision: str = "fp32"):
         """Train the pruning agents on a reasoning dataset with validation and checkpointing.
 
         Args:
@@ -206,6 +208,7 @@ class MicrogliaPruningSystem:
             max_steps_per_epoch: Maximum number of steps per epoch.
             val_split: Fraction of data to use for validation.
             early_stopping_patience: Number of epochs to wait for validation improvement.
+            precision: Mixed precision mode in {'fp32', 'fp16', 'bf16'}.
         """
         self.logger.info("\n" + "="*60)
         self.logger.info("Starting Training")
@@ -299,6 +302,15 @@ class MicrogliaPruningSystem:
         
         self.model.train()
         alpha_min, alpha_max = alpha_schedule
+
+        if precision not in {'fp32', 'fp16', 'bf16'}:
+            raise ValueError("precision must be one of {'fp32', 'fp16', 'bf16'}")
+        amp_dtype = {
+            'fp16': torch.float16,
+            'bf16': torch.bfloat16,
+            'fp32': torch.float32,
+        }[precision]
+        scaler = torch.cuda.amp.GradScaler(enabled=(precision == 'fp16' and torch.cuda.is_available()))
         
         self.logger.info(f"\nTraining for {num_epochs} epochs...")
         self.logger.info(f"Alpha schedule: {alpha_min} -> {alpha_max}\n")
@@ -324,8 +336,18 @@ class MicrogliaPruningSystem:
             for step, batch in enumerate(progress_bar):
                 batch = {k: v.to(self.device) for k, v in batch.items()}
                 
-                outputs = self.model(**batch, labels=batch['input_ids'])
-                task_loss = outputs.loss
+                amp_context = (
+                    torch.autocast(device_type='cuda', dtype=amp_dtype)
+                    if precision in {'fp16', 'bf16'} and torch.cuda.is_available()
+                    else (
+                        torch.autocast(device_type='cpu', dtype=torch.bfloat16)
+                        if precision == 'bf16'
+                        else nullcontext()
+                    )
+                )
+                with amp_context:
+                    outputs = self.model(**batch, labels=batch['input_ids'])
+                    task_loss = outputs.loss
                 
                 all_masks = []
                 layers = self.get_layers()
@@ -340,9 +362,16 @@ class MicrogliaPruningSystem:
                     
                     optimizer.zero_grad()
                     self.model.zero_grad()  # Also clear LoRA gradients
-                    total_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.agents.parameters(), 1.0)
-                    optimizer.step()
+                    if scaler.is_enabled():
+                        scaler.scale(total_loss).backward()
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(self.agents.parameters(), 1.0)
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        total_loss.backward()
+                        torch.nn.utils.clip_grad_norm_(self.agents.parameters(), 1.0)
+                        optimizer.step()
                     
                     epoch_metrics['task_loss'] += loss_dict['task_loss']
                     epoch_metrics['sparsity_loss'] += loss_dict['sparsity_loss']

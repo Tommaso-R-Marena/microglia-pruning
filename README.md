@@ -441,3 +441,55 @@ This project was inspired by:
 ## Questions?
 
 Open an issue or reach out via GitHub discussions.
+
+## Production Readiness Additions
+
+### 1) vLLM High-Throughput Inference
+
+Use the new inference engine with a `vllm` backend:
+
+```python
+from src.inference import InferenceEngine
+
+engine = InferenceEngine(model_name="microsoft/phi-3-mini-4k-instruct", backend="vllm")
+text = engine.generate("Explain microglia-inspired pruning.")
+```
+
+### 2) Mixed Precision (FP16/BF16)
+
+Training now supports precision selection:
+
+```bash
+python scripts/train.py --precision bf16
+python scripts/train.py --precision fp16
+```
+
+### 3) ONNX Export
+
+```bash
+python scripts/export_onnx.py --model gpt2 --output artifacts/model.onnx
+```
+
+### 4) FastAPI Serving Endpoint
+
+```bash
+python scripts/serve_api.py --model gpt2 --backend hf --port 8000
+curl -X POST http://localhost:8000/generate -H "content-type: application/json" -d '{"prompt":"Hello"}'
+```
+
+### 5) Coverage + Comprehensive Testing
+
+```bash
+pytest --cov=src --cov-report=term-missing
+```
+
+### Performance Benchmarks
+
+Run a quick benchmark:
+
+```bash
+python scripts/perf_benchmark.py --model gpt2 --backend hf --requests 20
+python scripts/perf_benchmark.py --model gpt2 --backend vllm --requests 20
+```
+
+See `deployment.md` for production deployment guidance and benchmark templates.
