@@ -37,6 +37,12 @@ def main():
         help="Dataset split"
     )
     parser.add_argument(
+        "--max_samples",
+        type=int,
+        default=200,
+        help="Maximum number of samples to evaluate"
+    )
+    parser.add_argument(
         "--output_dir",
         type=str,
         default="results/",
@@ -98,6 +104,7 @@ def main():
     metrics = system.evaluate(
         dataset_name=args.dataset,
         split=args.split,
+        max_samples=args.max_samples,
         use_pruning=not args.no_pruning
     )
     
