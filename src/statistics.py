@@ -49,8 +49,9 @@ def _compute_cross_head_correlation(hidden_states_heads: torch.Tensor) -> torch.
     normalized = centered / norm
 
     corr_matrix = torch.matmul(normalized, normalized.transpose(-1, -2))
-    eye = torch.eye(num_heads, device=hidden_states_heads.device, dtype=hidden_states_heads.dtype).unsqueeze(0)
-    corr_without_diag = corr_matrix.abs() * (1.0 - eye)
+    # Use in-place diagonal fill for better performance
+    corr_without_diag = corr_matrix.abs()
+    corr_without_diag.diagonal(dim1=-2, dim2=-1).fill_(0)
     return corr_without_diag.sum(dim=-1) / max(num_heads - 1, 1)
 
 
