@@ -106,7 +106,7 @@ def compute_layer_stats(
     entropy = torch.special.entr(attn_weights).sum(dim=-1).mean(dim=-1)
     
     # Statistic 4: Max attention per head
-    # Use torch.amax for better performance
+    # Use torch.amax for better performance and to avoid unnecessary index computation
     max_attn = torch.amax(attn_weights, dim=-1).mean(dim=-1)
 
     gradient_magnitude = _compute_gradient_magnitude(attn_weights, task_loss=task_loss, attn_grads=attn_grads)
