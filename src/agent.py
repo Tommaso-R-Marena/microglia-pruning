@@ -68,12 +68,16 @@ class MicrogliaAgent(nn.Module):
         self.norm2: nn.LayerNorm = nn.LayerNorm(hidden_dim)
 
         self.positional_projection: nn.Linear = nn.Linear(2, hidden_dim)
-        
-    def _layer_positional_encoding(self, batch_size: int, device: torch.device) -> torch.Tensor:
-        """Create sinusoidal encoding from normalized layer position."""
-        position = torch.tensor(self.layer_idx / max(self.num_layers - 1, 1), device=device, dtype=torch.float32)
-        encoding = torch.stack([torch.sin(math.pi * position), torch.cos(math.pi * position)], dim=0)
-        return encoding.unsqueeze(0).expand(batch_size, -1)
+
+        # Optimization: Cache positional encoding to avoid redundant trig calls and tensor creation
+        self.register_buffer("_pos_encoding", torch.empty(2, dtype=torch.float32), persistent=False)
+        self._recompute_positional_encoding()
+
+    def _recompute_positional_encoding(self) -> None:
+        """Recompute the cached sinusoidal encoding."""
+        position = self.layer_idx / max(self.num_layers - 1, 1)
+        self._pos_encoding[0] = math.sin(math.pi * position)
+        self._pos_encoding[1] = math.cos(math.pi * position)
 
     def forward(self, activation_stats: torch.Tensor, layer_idx: Optional[int] = None) -> torch.Tensor:
         """Predicts pruning masks from activation statistics.
@@ -87,13 +91,15 @@ class MicrogliaAgent(nn.Module):
             torch.Tensor: Masks of shape (batch, num_heads) with values in [0, 1].
                 Values close to 1 mean "keep this head", close to 0 mean "prune it".
         """
-        if layer_idx is not None:
+        if layer_idx is not None and int(layer_idx) != self.layer_idx:
             self.layer_idx = int(layer_idx)
+            self._recompute_positional_encoding()
 
         x = self.fc1(activation_stats)
 
-        pos_encoding = self._layer_positional_encoding(activation_stats.shape[0], activation_stats.device)
-        x = x + self.positional_projection(pos_encoding).to(x.dtype)
+        # Optimization: Project once and broadcast to batch, avoiding redundant computation
+        pos_proj = self.positional_projection(self._pos_encoding).to(x.dtype)
+        x = x + pos_proj
 
         residual = x
         x = self.norm1(x)
