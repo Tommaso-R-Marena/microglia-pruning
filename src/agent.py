@@ -69,27 +69,15 @@ class MicrogliaAgent(nn.Module):
 
         self.positional_projection: nn.Linear = nn.Linear(2, hidden_dim)
 
-        # Performance optimization: cache positional encoding to avoid redundant trig ops
-        self._cached_pos_encoding: Optional[torch.Tensor] = None
-        self._cached_layer_idx: int = self.layer_idx
-        
-    def _layer_positional_encoding(self, batch_size: int, device: torch.device) -> torch.Tensor:
-        """Create sinusoidal encoding from normalized layer position (cached)."""
-        if (
-            self._cached_pos_encoding is None
-            or self._cached_layer_idx != self.layer_idx
-            or self._cached_pos_encoding.device != device
-        ):
-            position = self.layer_idx / max(self.num_layers - 1, 1)
-            encoding = torch.tensor(
-                [math.sin(math.pi * position), math.cos(math.pi * position)],
-                device=device,
-                dtype=torch.float32
-            )
-            self._cached_pos_encoding = encoding
-            self._cached_layer_idx = self.layer_idx
+        # Optimization: Cache positional encoding to avoid redundant trig calls and tensor creation
+        self.register_buffer("pos_encoding", torch.empty(2, dtype=torch.float32), persistent=False)
+        self._recompute_positional_encoding()
 
-        return self._cached_pos_encoding.unsqueeze(0).expand(batch_size, -1)
+    def _recompute_positional_encoding(self) -> None:
+        """Recompute the cached sinusoidal encoding."""
+        position = self.layer_idx / max(self.num_layers - 1, 1)
+        self.pos_encoding[0] = math.sin(math.pi * position)
+        self.pos_encoding[1] = math.cos(math.pi * position)
 
     def forward(self, activation_stats: torch.Tensor, layer_idx: Optional[int] = None) -> torch.Tensor:
         """Predicts pruning masks from activation statistics.
@@ -110,7 +98,7 @@ class MicrogliaAgent(nn.Module):
         x = self.fc1(activation_stats)
 
         # Optimization: Project once and broadcast to batch, avoiding redundant computation
-        pos_proj = self.positional_projection(self._pos_encoding).to(x.dtype)
+        pos_proj = self.positional_projection(self.pos_encoding).to(x.dtype)
         x = x + pos_proj
 
         residual = x
