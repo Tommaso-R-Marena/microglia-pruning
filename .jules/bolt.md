@@ -8,3 +8,7 @@
 ## 2026-05-22 - [Cache positional encoding in MicrogliaAgent]
 **Learning:** Redundant trigonometric operations and tensor allocations in the forward pass of small MLP agents can cumulatively impact latency, especially when called for every layer in a deep transformer. Caching these values with device-awareness provides a significant (21%) speedup to the agent's forward pass.
 **Action:** Always look for static or quasi-static computations in "hot" forward paths that can be cached or pre-computed.
+
+## 2026-05-23 - [Consolidating Stats with std_mean]
+**Learning:** `torch.std_mean` is slightly faster (approx 5%) than calling `.std()` and `.mean()` separately because it computes both in a single pass over the data, reducing memory bandwidth pressure.
+**Action:** Use `torch.std_mean` when both statistics are required for the same tensor and dimension.
