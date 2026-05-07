@@ -59,7 +59,7 @@ class PrunedAttention(nn.Module):
         topk_indices = masks.topk(k=keep_k, dim=1).indices
         budget_mask = torch.zeros_like(masks)
         budget_mask.scatter_(1, topk_indices, 1.0)
-        return budget_mask
+        return masks * budget_mask
         
     def forward(self, 
                 hidden_states: torch.Tensor,
