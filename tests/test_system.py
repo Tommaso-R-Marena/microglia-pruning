@@ -7,7 +7,26 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.system import MicrogliaPruningSystem
+from src.system import MicrogliaPruningSystem, _mask_labels_for_padding
+
+
+def test_mask_labels_for_padding_uses_attention_mask_over_pad_id():
+    input_ids = torch.tensor([[2, 3, 2, 2]])
+    attention_mask = torch.tensor([[1, 1, 1, 0]])
+
+    labels = _mask_labels_for_padding(
+        input_ids,
+        attention_mask=attention_mask,
+        pad_token_id=2,
+    )
+
+    assert labels.tolist() == [[2, 3, 2, -100]]
+
+
+def test_mask_labels_for_padding_requires_pad_id_without_attention_mask():
+    input_ids = torch.tensor([[1, 2, 3]])
+    with pytest.raises(ValueError, match="pad_token_id is required"):
+        _mask_labels_for_padding(input_ids)
 
 class FakeAttention(nn.Module):
     def __init__(self, hidden_dim=64, num_heads=4):
@@ -90,6 +109,20 @@ class TestSystemIntegration:
         for layer in layers:
             from src.pruned_attention import PrunedAttention
             assert isinstance(layer.self_attn, PrunedAttention)
+
+    def test_extract_answer_robustness(self):
+        """Test robust numerical answer extraction across common output formats."""
+        fake_model = FakeModel(num_layers=2, hidden_dim=64, num_heads=4)
+        system = MicrogliaPruningSystem(model=fake_model, num_heads=4, hidden_dim=32, device='cpu')
+
+        assert system._extract_answer("the answer is 42 students") == 42.0
+        assert system._extract_answer("#### 100") == 100.0
+        assert system._extract_answer("so there are 3.5 times as many, meaning 7 total") == 7.0
+        assert system._extract_answer("no numbers here") is None
+        assert system._extract_answer("$1,234.56 dollars") == 1234.56
+        assert system._extract_answer(
+            "Question: If 3+4?\nAnswer: let's think. 3 and 4 make 7.\nAnswer: 7"
+        ) == 7.0
 
     def test_generate_toggles_pruning(self):
         """Test that generate method correctly toggles pruning state."""
